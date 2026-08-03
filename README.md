@@ -1,94 +1,94 @@
 # DBT Sentinel
 
-**Impact analyzer for dbt migrations in locked-down environments.**
+**Analisador de impacto para migrações dbt em ambientes restritos.**
 
-Compares a delivery package (ZIP from a ticket) against a corporate dbt project and produces a visual HTML assistant: what to create, what to append, dependency order, lineage, and policy warnings — without writing into the dbt repo.
+Compara o pacote de entrega (ZIP de um card) com o projeto dbt corporativo e gera um assistente visual em HTML: o que criar, o que acrescentar, ordem de dependências, lineage e alertas de política — **sem gravar nada** no repositório dbt.
 
-Built for consultants working on restricted VDIs where `pip`, `npm`, Docker, and IDE plugins are not available.
+Feito para consultoria em VDIs travadas, onde `pip`, `npm`, Docker e plugins de IDE não estão disponíveis.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Dependencies](https://img.shields.io/badge/deps-stdlib%20only-success)](#tech-stack)
-[![License](https://img.shields.io/badge/license-see%20repo-lightgrey)](#)
+[![Dependências](https://img.shields.io/badge/deps-somente%20stdlib-success)](#stack)
+[![Licença](https://img.shields.io/badge/license-ver%20repositório-lightgrey)](#)
 
 ---
 
-## Why it exists
+## Por que existe
 
-Migrating SaaS-generated dbt models into a large corporate repository is error-prone:
+Levar modelos dbt gerados em SaaS para um repositório corporativo grande é arriscado:
 
-- Packages mix **new files** with **edits to models that already exist**
-- Naming differs (`stg_cliente` vs `stg_clientes`), so duplicates slip in
-- Teams need a clear **create / append / do-not-touch** decision, not a blind overwrite
-- Environments often block installing packages — the tool must run on **Python stdlib alone**
+- O pacote mistura **arquivos novos** com **alterações em modelos que já existem**
+- Nomes divergem (`stg_cliente` vs `stg_clientes`) e o time acaba duplicando objeto
+- É preciso uma decisão clara: **criar / acrescentar / não mexer** — não um overwrite cego
+- Muitos ambientes bloqueiam instalação de pacotes — a ferramenta precisa rodar só com **stdlib do Python**
 
-DBT Sentinel turns that comparison into a guided checklist and lineage view.
+O DBT Sentinel transforma essa comparação em checklist guiado + visão de lineage.
 
 ```text
-Ticket ZIP (workspace)  +  Corporate dbt (base, read-only)
-            ↓
-      engine analysis
-            ↓
-   output/index.html  ·  session.json  ·  optional snapshot
+ZIP do card (workspace)  +  dbt corporativo (base, somente leitura)
+              ↓
+        análise no engine
+              ↓
+   output/index.html  ·  session.json  ·  snapshot opcional
 ```
 
 ---
 
-## Features
+## Funcionalidades
 
-| Capability | What you get |
+| Capacidade | O que entrega |
 |---|---|
-| **Additive policy** | Prefer *create new files* and *append only new columns/refs*; never rewrite existing SQL by default |
-| **Impact checklist** | Grouped by action (create / append / review) and business domain |
-| **Execution order** | Topological order: source → sample → staging → intermediate → dim/fact → aggregate |
-| **Interactive lineage** | Layer lanes with SVG edges that **fan out** when one model feeds many |
-| **Rename detection** | Fuzzy matching + aliases to flag “same object, different name” |
-| **Taxonomy checks** | Naming and column-prefix conventions (F / DIB / AGGR, `id_`, `nm_`, …) |
-| **Sources awareness** | Warns when `source('…')` is used but missing from `sources.yml` |
-| **Final verification** | On finalize, re-scans the base and reports created / appended / missing / partial |
-| **Hardened I/O** | Writes only under `output/` and `snapshots/`; path traversal guards; HTML escaping |
+| **Política aditiva** | Prioriza *criar arquivos novos* e *acrescentar só colunas/refs novas*; por padrão não reescreve SQL antigo |
+| **Checklist de impacto** | Agrupado por ação (criar / acrescentar / revisar) e domínio de negócio |
+| **Ordem de execução** | Ordem topológica: source → sample → staging → intermediate → dim/fato → aggregate |
+| **Lineage interativo** | Faixas por camada com setas SVG que **se dividem** quando um modelo alimenta vários |
+| **Detecção de rename** | Matching fuzzy + aliases para marcar “mesmo objeto, outro nome” |
+| **Taxonomia** | Convenções de nome e prefixo de coluna (F / DIB / AGGR, `id_`, `nm_`, …) |
+| **Sources** | Avisa se `source('…')` é usado sem declaração em `sources.yml` |
+| **Verificação final** | Ao finalizar, relê a base e reporta criado / acrescentado / faltando / parcial |
+| **I/O endurecido** | Escreve só em `output/` e `snapshots/`; proteção de path; HTML escapado |
 
 ---
 
-## Tech stack
+## Stack
 
-| Layer | Choice | Rationale |
+| Camada | Escolha | Motivo |
 |---|---|---|
-| Runtime | Python 3 (stdlib) | No `pip` / venv required on locked VDIs |
-| UI | Single-file HTML + CSS + JS | Open locally; no build step |
-| Parsing | Regex / lightweight YAML | Fast structural scan of `.sql` / `.yml` |
-| Persistence | JSON session + snapshots | Audit trail per ticket |
+| Runtime | Python 3 (stdlib) | Sem `pip` / venv em VDI fechada |
+| UI | HTML + CSS + JS em um arquivo | Abre no navegador; sem build |
+| Parsing | Regex / YAML leve | Scan estrutural rápido de `.sql` / `.yml` |
+| Persistência | Sessão JSON + snapshots | Rastro por card |
 
-Zero third-party Python packages. Zero frontend bundler.
+Zero dependência Python de terceiros. Zero bundler de frontend.
 
 ---
 
-## Quick start
+## Como rodar
 
 ```bash
 git clone https://github.com/J034ll4n/dbt-sentinel.git
 cd dbt-sentinel
 ```
 
-1. Edit `config.json` — point `base_project_path` at your dbt root (read-only) and put the ticket extract under `workspace/`.
-2. Run:
+1. Edite o `config.json` — aponte `base_project_path` para a raiz do dbt (somente leitura) e coloque o extrato do card em `workspace/`.
+2. Execute:
 
 ```bash
 py -3 main.py
 ```
 
-3. Open `output/index.html` and follow the **Assistente** / **Ordem** / **Lineage** tabs.
+3. Abra `output/index.html` e use as abas **Assistente**, **Ordem**, **Arquivos**, **Lineage** e **Alertas**.
 
-### Demo fixtures
+### Demo incluída
 
-This repo includes a small sample base under `demo_base/` and a helper script:
+O repositório traz uma base de exemplo em `demo_base/` e um script auxiliar:
 
 ```bash
 py -3 run_demo.py
 ```
 
-Then open `output/index.html` to explore create/append actions and fan-out lineage without a corporate repo.
+Depois abra `output/index.html` para ver criar/acrescentar e o fan-out do lineage sem precisar de um repo corporativo.
 
-### Tests
+### Testes
 
 ```bash
 py -3 tests.py
@@ -96,16 +96,16 @@ py -3 tests.py
 
 ---
 
-## Configuration (overview)
+## Configuração (visão geral)
 
 ```json
 {
-  "base_project_path": "path/to/dbt-root",
-  "base_include": ["domain_a", "domain_b"],
+  "base_project_path": "caminho/para/dbt-raiz",
+  "base_include": ["dominio_a", "dominio_b"],
   "workspace_path": "workspace",
   "output_path": "output",
   "snapshots_path": "snapshots",
-  "card_id": "TICKET-123",
+  "card_id": "CARD-123",
   "add_only": true,
   "enforce_taxonomy": true,
   "detect_removed": false,
@@ -113,79 +113,79 @@ py -3 tests.py
 }
 ```
 
-| Key | Role |
+| Campo | Função |
 |---|---|
-| `base_project_path` | Corporate dbt root (**never modified**) |
-| `base_include` | Optional domain folders to scope the scan |
-| `workspace_path` | Extracted ticket / ZIP contents |
-| `add_only` | Additive policy (create + append-only) |
-| `enforce_taxonomy` | Corporate naming / type heuristics |
-| `card_id` | Label for the HTML report and snapshot |
+| `base_project_path` | Raiz do dbt corporativo (**nunca alterada**) |
+| `base_include` | Pastas de domínio opcionais para delimitar o scan |
+| `workspace_path` | Conteúdo extraído do card / ZIP |
+| `add_only` | Política aditiva (criar + só acrescer o novo) |
+| `enforce_taxonomy` | Heurísticas de nomenclatura / tipo |
+| `card_id` | Rótulo do relatório HTML e do snapshot |
 
-Day-to-day consultant steps live in [`GUIA_DE_USO.md`](GUIA_DE_USO.md).
+Checklist operacional do dia a dia: [`GUIA_DE_USO.md`](GUIA_DE_USO.md).
 
 ---
 
-## Architecture
+## Arquitetura
 
 ```text
 ┌─────────────┐     ┌──────────────────────────┐     ┌─────────────────┐
-│  config.json│────▶│  main.py (CLI + safety)  │────▶│ output/index.html│
+│  config.json│────▶│  main.py (CLI + segurança)│────▶│ output/index.html│
 └─────────────┘     └────────────┬─────────────┘     │ session.json     │
                                  │                   │ snapshots/       │
                     ┌────────────▼─────────────┐     └─────────────────┘
                     │  engine.py               │
-                    │  · scan & parse SQL/YAML │
-                    │  · diff + policy buckets │
-                    │  · graph / topo / lineage│
+                    │  · scan e parse SQL/YAML │
+                    │  · diff + buckets de política │
+                    │  · grafo / topo / lineage│
                     │  · validate + verify     │
                     └────────────┬─────────────┘
                                  │
                     ┌────────────▼─────────────┐
-                    │  ui.py → self-contained  │
-                    │  HTML report             │
+                    │  ui.py → relatório HTML  │
+                    │  autocontido             │
                     └──────────────────────────┘
 ```
 
 ---
 
-## Design principles
+## Princípios de design
 
-1. **Read-only on the corporate tree** — analysis never patches production models.
-2. **Policy over diff spam** — surface *what to add*, not every line of SQL churn.
-3. **Works offline under IT lockdown** — stdlib + static HTML only.
-4. **Consultant-speed UX** — tabs for assistant, order, files, lineage, alerts.
-5. **Verifiable close-out** — re-check the base before snapshotting a ticket as done.
-
----
-
-## What it is not
-
-- Not a replacement for `dbt run` / `dbt test`
-- Not a BigQuery or SaaS validator
-- Not an auto-merger into the corporate repository
-
-It is a **decision and impact layer** before you touch the real project.
+1. **Somente leitura na árvore corporativa** — a análise nunca patcha modelos de produção.
+2. **Política acima de diff barulhento** — mostra *o que acrescentar*, não cada linha de churn de SQL.
+3. **Funciona offline sob lockdown de TI** — só stdlib + HTML estático.
+4. **UX na velocidade do consultor** — abas para assistente, ordem, arquivos, lineage e alertas.
+5. **Fechamento verificável** — confere a base de novo antes de gravar o snapshot do card.
 
 ---
 
-## Project layout
+## O que não é
+
+- Não substitui `dbt run` / `dbt test`
+- Não valida BigQuery nem SaaS
+- Não faz merge automático no repositório corporativo
+
+É uma **camada de decisão e impacto** antes de tocar no projeto real.
+
+---
+
+## Estrutura do projeto
 
 ```text
-main.py          CLI entry, git integrity checks, snapshot + verification
-engine.py        Parsing, matching, policy, graph, lineage, validate/verify
-ui.py            HTML/CSS/JS report generator
-tests.py         Stdlib test suite
-config.json      Runtime paths and policy flags
-run_demo.py      Generate report against demo_base/
-demo_base/       Sample corporate-like dbt tree
-GUIA_DE_USO.md   Short operator checklist (PT)
+main.py          Entrada CLI, checagens de integridade, snapshot + verificação
+engine.py        Parse, matching, política, grafo, lineage, validate/verify
+ui.py            Gerador do relatório HTML/CSS/JS
+tests.py         Suite de testes (stdlib)
+config.json      Paths e flags de política
+run_demo.py      Gera o relatório contra demo_base/
+demo_base/       Árvore dbt de exemplo
+GUIA_DE_USO.md   Checklist rápido do operador
 ```
 
 ---
 
-## Author
+## Autor
 
-Built as a practical tool for dbt migration work under enterprise constraints — and as a portfolio piece showing end-to-end product thinking: problem framing, constrained engineering, UX for non-experts, and safety around production codebases.
+Ferramenta prática para migração dbt sob restrições empresariais — e também peça de portfólio: enquadramento do problema, engenharia sob restrição, UX para quem não é expert, e cuidado com codebases de produção.
 
-Repository: [github.com/J034ll4n/dbt-sentinel](https://github.com/J034ll4n/dbt-sentinel)
+Repositório: [github.com/J034ll4n/dbt-sentinel](https://github.com/J034ll4n/dbt-sentinel)

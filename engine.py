@@ -216,7 +216,14 @@ def parse_file(path: str, root: str) -> dict | None:
         if parsed.get("sources"):
             kind = "source"
     elif ext == ".csv":
-        parsed = {"refs": [], "sources": [], "joins": [], "casts": [], "columns": []}
+        parsed = {
+            "refs": [],
+            "sources": [],
+            "joins": [],
+            "casts": [],
+            "columns": [],
+            "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+        }
         kind = "seed"
     else:
         return None
@@ -232,6 +239,7 @@ def parse_file(path: str, root: str) -> dict | None:
         "joins": parsed.get("joins", []),
         "casts": parsed.get("casts", []),
         "columns": parsed.get("columns", []),
+        "content_hash": parsed.get("content_hash", ""),
     }
     model["hash"] = structural_hash(model)
     return model
@@ -276,51 +284,89 @@ def parse_sql(text: str) -> dict:
     sources = sorted(set((a, b) for a, b in RE_SOURCE.findall(clean)))
     joins = sorted(set(j.upper().replace("  ", " ") for j in RE_JOIN.findall(clean)))
     casts = sorted(set(c.upper() for c in RE_CAST.findall(clean)))
-    # heurística leve de colunas no SELECT
     cols = []
     m = re.search(r"\bselect\b(.*?)\bfrom\b", clean, re.I | re.S)
     if m:
         chunk = m.group(1)
-        # evita pegar * sozinho como coluna
         for c in RE_SELECT_COLS.findall(chunk):
             if c.lower() not in {"as", "on", "and", "or", "case", "when", "then", "else", "end"}:
                 cols.append(c.lower())
         cols = sorted(set(cols))[:40]
+    # fingerprint do corpo (WHERE, CTEs, etc.) — evita IGUAL falso
+    body_norm = re.sub(r"\s+", " ", clean).strip().lower()
+    content_hash = hashlib.sha256(body_norm.encode("utf-8")).hexdigest()[:16]
     return {
         "refs": refs,
         "sources": [list(s) for s in sources],
         "joins": joins,
         "casts": casts,
         "columns": cols,
+        "content_hash": content_hash,
     }
 
 
+def _yaml_top_sections(text: str) -> dict[str, str]:
+    """Divide o YAML em blocos de chave de topo (sources:, models:, ...)."""
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in text.splitlines():
+        m = re.match(r"^([A-Za-z_][\w]*)\s*:\s*(?:#.*)?$", line)
+        if m:
+            current = m.group(1).lower()
+            sections.setdefault(current, [])
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return {k: "\n".join(v) for k, v in sections.items()}
+
+
 def parse_yaml(text: str) -> dict:
-    """Parser YAML mínimo via regex — sem PyYAML."""
-    sources = []
-    models = []
-    # sources: - name: schema / tables: - name: table
-    for block in re.finditer(
-        r"(?ms)^\s*-\s*name:\s*([^\n#]+).*?(?=^\s*-\s*name:|\Z)",
-        text,
-    ):
-        chunk = block.group(0)
-        schema = block.group(1).strip().strip("\"'")
-        tables = re.findall(r"(?m)^\s+-\s*name:\s*([^\n#]+)", chunk)
-        if tables:
-            for t in tables:
-                sources.append([schema, t.strip().strip("\"'")])
-        else:
-            models.append(schema)
-    # fallback: procurar source/table soltos
-    if not sources:
-        for m in re.finditer(
-            r"(?ms)name:\s*([^\n]+).*?tables:.*?(?=^\S|\Z)",
-            text,
-        ):
-            schema = m.group(1).strip().strip("\"'")
-            for t in re.findall(r"(?m)^\s+-\s*name:\s*([^\n#]+)", m.group(0)):
-                sources.append([schema, t.strip().strip("\"'")])
+    """Parser YAML mínimo — sources: separado de models: (não confunde colunas)."""
+    sources: list[list[str]] = []
+    models: list[str] = []
+    sections = _yaml_top_sections(text)
+
+    src_block = sections.get("sources", "")
+    if src_block:
+        lines = src_block.splitlines()
+        i = 0
+        while i < len(lines):
+            m = re.match(r"^(\s*)-\s*name:\s*([^\n#]+)", lines[i])
+            if not m:
+                i += 1
+                continue
+            indent = len(m.group(1))
+            schema = m.group(2).strip().strip("\"'")
+            i += 1
+            # consumir até próximo item da mesma indentação
+            in_tables = False
+            while i < len(lines):
+                line = lines[i]
+                m2 = re.match(r"^(\s*)-\s*name:\s*([^\n#]+)", line)
+                if m2 and len(m2.group(1)) <= indent:
+                    break
+                if re.match(rf"^\s{{{indent + 1},}}tables:\s*", line):
+                    in_tables = True
+                    i += 1
+                    continue
+                # fallback: linha com "tables:" mais indentada
+                if re.match(r"^\s+tables:\s*(?:#.*)?$", line) and len(line) - len(line.lstrip(" ")) > indent:
+                    in_tables = True
+                    i += 1
+                    continue
+                if in_tables:
+                    mt = re.match(r"^(\s*)-\s*name:\s*([^\n#]+)", line)
+                    if mt and len(mt.group(1)) > indent:
+                        sources.append([schema, mt.group(2).strip().strip("\"'")])
+                i += 1
+
+    mod_block = sections.get("models", "")
+    if mod_block:
+        for line in mod_block.splitlines():
+            m = re.match(r"^(\s*)-\s*name:\s*([^\n#]+)", line)
+            if m and len(m.group(1)) <= 4:
+                models.append(m.group(2).strip().strip("\"'"))
+
     return {
         "refs": [],
         "sources": sources,
@@ -328,6 +374,9 @@ def parse_yaml(text: str) -> dict:
         "casts": [],
         "columns": models,
         "yaml_models": models,
+        "content_hash": hashlib.sha256(
+            re.sub(r"\s+", " ", text).strip().lower().encode("utf-8")
+        ).hexdigest()[:16],
     }
 
 
@@ -341,6 +390,24 @@ def structural_hash(model: dict) -> str:
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def models_equal(a: dict, b: dict) -> bool:
+    """IGUAL só se estrutura E corpo forem iguais."""
+    if a.get("content_hash") and b.get("content_hash"):
+        return a["content_hash"] == b["content_hash"] and a.get("hash") == b.get("hash")
+    return a.get("hash") == b.get("hash")
+
+
+def models_changed(a: dict, b: dict) -> list[str]:
+    """Diff semântico + nota se só o corpo mudou."""
+    diff = semantic_diff(a, b)
+    if a.get("content_hash") and b.get("content_hash") and a["content_hash"] != b["content_hash"]:
+        if a.get("hash") == b.get("hash"):
+            diff.append("~ lógica/SQL alterada (mesmo refs/colunas, corpo diferente)")
+        elif not any("lógica" in d for d in diff):
+            diff.append("~ conteúdo do arquivo alterado")
+    return diff
 
 
 def _set_diff(a: list, b: list) -> tuple[list, list]:
@@ -430,7 +497,10 @@ def match_score(ws_model: dict, base_model: dict) -> tuple[float, list[str]]:
     ns = name_similarity(ws_model.get("name", ""), base_model.get("name", ""))
     ss = structure_similarity(ws_model, base_model)
     same_layer = ws_model.get("layer") == base_model.get("layer")
-    same_hash = bool(ws_model.get("hash") and ws_model.get("hash") == base_model.get("hash"))
+    same_hash = bool(
+        (ws_model.get("content_hash") and ws_model.get("content_hash") == base_model.get("content_hash"))
+        or (ws_model.get("hash") and ws_model.get("hash") == base_model.get("hash"))
+    )
 
     if same_hash:
         reasons.append("estrutura idêntica (hash)")
@@ -450,7 +520,7 @@ def find_best_match(ws_model: dict, base: dict, used: set, min_score: float = 0.
     """Encontra o melhor candidato na base para um modelo do workspace.
 
     Só casa automaticamente dentro da mesma camada (sample ≠ stg).
-    Para cruzar camadas, use aliases no config.json.
+    Não casa com nome que já existe no workspace (evita double-claim).
     """
     best = None
     best_score = 0.0
@@ -470,13 +540,47 @@ def find_best_match(ws_model: dict, base: dict, used: set, min_score: float = 0.
     return {"name": best, "score": round(best_score, 3), "reasons": best_reasons}
 
 
+def assign_renames(
+    orphans: list[dict],
+    base: dict,
+    reserved: set,
+    match_threshold: float,
+) -> dict[str, dict]:
+    """Atribuição exclusiva: melhor score primeiro (sem dois ZIP → mesmo base)."""
+    candidates = []
+    for w in orphans:
+        for bname, bmodel in base.items():
+            if bname in reserved:
+                continue
+            if w.get("layer") != bmodel.get("layer"):
+                continue
+            score, reasons = match_score(w, bmodel)
+            if score >= match_threshold:
+                candidates.append((score, w["name"], bname, reasons))
+    candidates.sort(key=lambda x: (-x[0], x[1], x[2]))
+    assigned: dict[str, dict] = {}
+    used_base = set(reserved)
+    used_ws = set()
+    for score, wname, bname, reasons in candidates:
+        if wname in used_ws or bname in used_base:
+            continue
+        used_ws.add(wname)
+        used_base.add(bname)
+        assigned[wname] = {
+            "name": bname,
+            "score": round(score, 3),
+            "reasons": reasons,
+            "path": base[bname].get("path", ""),
+        }
+    return assigned
+
+
 def resolve_alias(name: str, aliases: dict) -> str | None:
     """aliases: workspace_name -> base_name (ou o inverso)."""
     if not aliases:
         return None
     if name in aliases:
         return aliases[name]
-    # inverso
     for ws_name, base_name in aliases.items():
         if base_name == name:
             return ws_name
@@ -493,35 +597,36 @@ def compare(
     """Compara workspace (ZIP) contra a base.
 
     Por padrão só avalia arquivos do workspace (ZIP parcial do Jira).
-    Detecta nomes diferentes para o mesmo objeto via aliases + similaridade.
+    Detecta nomes diferentes para o mesmo objeto via aliases + similaridade exclusiva.
     """
     aliases = aliases or {}
-    names = set(ws)
-    if detect_removed:
-        names |= set(base)
-
-    def sort_key(n):
-        m = ws.get(n) or base.get(n) or {}
-        return (layer_order(m.get("layer", "other")), n)
-
     items = []
-    claimed_base = set()  # base names já associados a um item do ws
+    claimed_base = set()
+    pending_orphan: list[dict] = []
 
-    for name in sorted(names, key=sort_key):
-        b, w = base.get(name), ws.get(name)
+    # Passo 1: matches exatos e aliases
+    for name in sorted(ws.keys(), key=lambda n: (layer_order(ws[n].get("layer", "other")), n)):
+        w = ws[name]
+        b = base.get(name)
         match_info = None
-        alias_target = resolve_alias(name, aliases) if w else None
+        alias_target = resolve_alias(name, aliases)
 
-        # 1) Alias manual: ZIP name -> base name
-        if w and not b and alias_target and alias_target in base:
+        if b:
+            claimed_base.add(name)
+            if models_equal(b, w):
+                status, diff = "IGUAL", []
+            else:
+                status, diff = "ALTERADO", models_changed(b, w)
+            model = w
+            target = b["path"]
+        elif alias_target and alias_target in base and alias_target not in claimed_base:
             b = base[alias_target]
             claimed_base.add(alias_target)
-            if b["hash"] == w["hash"]:
+            if models_equal(b, w):
                 status, diff = "IGUAL", [f"Alias: {name} = {alias_target} (mesmo conteúdo)"]
             else:
                 status, diff = "ALTERADO", (
-                    [f"Alias: {name} no ZIP = {alias_target} no projeto"]
-                    + semantic_diff(b, w)
+                    [f"Alias: {name} no ZIP = {alias_target} no projeto"] + models_changed(b, w)
                 )
             model = w
             match_info = {
@@ -530,50 +635,10 @@ def compare(
                 "reasons": ["alias manual no config.json"],
                 "path": b.get("path", ""),
             }
-        elif w and not b:
-            # 2) Fuzzy: possível mesmo objeto com outro nome
-            hit = find_best_match(w, base, claimed_base, min_score=match_threshold)
-            if hit:
-                claimed_base.add(hit["name"])
-                bmatch = base[hit["name"]]
-                status = "RENOMEADO"
-                diff = semantic_diff(bmatch, w)
-                diff.insert(
-                    0,
-                    f"ZIP chama '{name}', projeto tem '{hit['name']}' "
-                    f"(confiança {int(hit['score'] * 100)}%)",
-                )
-                for r in hit["reasons"]:
-                    diff.append(f"· {r}")
-                model = w
-                match_info = {**hit, "path": bmatch.get("path", "")}
-                b = bmatch  # para target path
-            else:
-                status, model, diff = "NOVO", w, []
-        elif b and not w:
-            if not detect_removed:
-                continue
-            if name in claimed_base:
-                continue  # já coberto como renomeação
-            status, model, diff = "REMOVIDO", b, []
-        elif b and w:
-            claimed_base.add(name)
-            if b["hash"] == w["hash"]:
-                status, diff = "IGUAL", []
-            else:
-                status, diff = "ALTERADO", semantic_diff(b, w)
-            model = w
-        else:
-            continue
-
-        if status == "NOVO":
-            target = w["path"]
-        elif match_info and match_info.get("path"):
-            target = match_info["path"]
-        elif b:
             target = b["path"]
         else:
-            target = model["path"]
+            pending_orphan.append(w)
+            continue
 
         item = {
             "name": name,
@@ -588,6 +653,7 @@ def compare(
             "refs": model.get("refs", []),
             "sources": model.get("sources", []),
             "hash": model.get("hash", ""),
+            "content_hash": model.get("content_hash", ""),
             "done": status == "IGUAL",
             "match": match_info,
         }
@@ -595,6 +661,79 @@ def compare(
             item["match_name"] = match_info["name"]
             item["match_score"] = match_info["score"]
         items.append(item)
+
+    # Passo 2: renomeações exclusivas (nunca se o nome do base já está no ZIP)
+    reserved = set(claimed_base) | set(ws.keys())
+    renames = assign_renames(pending_orphan, base, reserved, match_threshold)
+    for w in pending_orphan:
+        name = w["name"]
+        hit = renames.get(name)
+        if hit:
+            claimed_base.add(hit["name"])
+            bmatch = base[hit["name"]]
+            status = "RENOMEADO"
+            diff = models_changed(bmatch, w)
+            diff.insert(
+                0,
+                f"ZIP chama '{name}', projeto tem '{hit['name']}' "
+                f"(confiança {int(hit['score'] * 100)}%)",
+            )
+            for r in hit["reasons"]:
+                diff.append(f"· {r}")
+            target = hit["path"]
+            match_info = hit
+        else:
+            status = "NOVO"
+            diff = []
+            target = w["path"]
+            match_info = None
+
+        item = {
+            "name": name,
+            "status": status,
+            "label": ACTION_LABEL[status],
+            "hint": ACTION_HINT[status],
+            "path": target,
+            "layer": w.get("layer", "other"),
+            "layer_order": layer_order(w.get("layer", "other")),
+            "type": w.get("type", "model"),
+            "diff": diff,
+            "refs": w.get("refs", []),
+            "sources": w.get("sources", []),
+            "hash": w.get("hash", ""),
+            "content_hash": w.get("content_hash", ""),
+            "done": False,
+            "match": match_info,
+        }
+        if match_info:
+            item["match_name"] = match_info["name"]
+            item["match_score"] = match_info["score"]
+        items.append(item)
+
+    # Passo 3: removidos (opcional)
+    if detect_removed:
+        for name in sorted(base.keys()):
+            if name in ws or name in claimed_base:
+                continue
+            b = base[name]
+            items.append({
+                "name": name,
+                "status": "REMOVIDO",
+                "label": ACTION_LABEL["REMOVIDO"],
+                "hint": ACTION_HINT["REMOVIDO"],
+                "path": b["path"],
+                "layer": b.get("layer", "other"),
+                "layer_order": layer_order(b.get("layer", "other")),
+                "type": b.get("type", "model"),
+                "diff": [],
+                "refs": b.get("refs", []),
+                "sources": b.get("sources", []),
+                "hash": b.get("hash", ""),
+                "content_hash": b.get("content_hash", ""),
+                "done": False,
+                "match": None,
+            })
+
     return items
 
 
@@ -1023,8 +1162,14 @@ def run(config: dict) -> dict:
     }
 
     empty_ws = len(ws) == 0
+    missing_base = not (base_path and os.path.isdir(base_path))
     message = ""
-    if empty_ws:
+    if missing_base:
+        message = (
+            "BASE AUSENTE OU INVÁLIDA — resultados NÃO são confiáveis. "
+            "Configure base_project_path no config.json."
+        )
+    elif empty_ws:
         message = (
             "Nenhum arquivo encontrado no workspace. "
             "Extraia o ZIP do Jira na pasta workspace/ e execute novamente."
@@ -1052,5 +1197,6 @@ def run(config: dict) -> dict:
         "timeline": load_timeline(snapshots_path),
         "patterns": patterns,
         "empty_workspace": empty_ws,
+        "missing_base": missing_base,
     }
     return session

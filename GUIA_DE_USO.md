@@ -183,6 +183,10 @@ Se houver itens pendentes, pede confirmação extra.
 | Arquivos grandes | Ignora > 2 MB; limite de 20k arquivos |
 | Config validada | Recusa output/snapshots dentro do projeto DBT |
 | Aliases tipados | Objeto string→string obrigatório |
+| Hash do corpo SQL | `IGUAL` exige mesma lógica (não só refs/colunas) |
+| YAML scopes | `sources:` e `models:` separados (colunas ≠ sources) |
+| Rename exclusivo | Um ZIP não “rouba” o mesmo modelo base duas vezes |
+| Base obrigatória | Falha se `base_project_path` inválido (use `allow_empty_base` só em emergência) |
 
 ---
 

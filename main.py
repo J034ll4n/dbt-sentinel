@@ -46,6 +46,10 @@ def load_config() -> dict:
         cfg["match_threshold"] = 0.62
     if "detect_removed" not in cfg:
         cfg["detect_removed"] = False
+    if "allow_empty_base" not in cfg:
+        cfg["allow_empty_base"] = False
+    if "require_git_integrity" not in cfg:
+        cfg["require_git_integrity"] = False
 
     errors = engine.validate_config(cfg)
     if errors:
@@ -60,12 +64,13 @@ def load_config() -> dict:
     return cfg
 
 
-def git_porcelain(repo: str) -> str:
+def git_porcelain(repo: str) -> str | None:
+    """Retorna porcelain string, '' se limpo, None se git indisponível."""
     if not repo or not os.path.isdir(repo):
-        return ""
+        return None
     git_dir = os.path.join(repo, ".git")
     if not os.path.isdir(git_dir):
-        return ""
+        return None
     try:
         out = subprocess.run(
             ["git", "-c", "safe.directory=*", "status", "--porcelain"],
@@ -76,10 +81,10 @@ def git_porcelain(repo: str) -> str:
             shell=False,
         )
         if out.returncode != 0:
-            return ""
+            return None
         return out.stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return None
 
 
 def assert_write_target(path: str, allowed_roots: list[str]) -> None:
@@ -158,10 +163,13 @@ def main() -> None:
 
     if not base or not os.path.isdir(base):
         print()
-        print("AVISO: base_project_path inválido no config.json")
+        print("ERRO: base_project_path inválido no config.json")
         print(f"  Atual: {base!r}")
         print("  Edite config.json com o caminho absoluto do repositório DBT.")
-        print("  Continuando só com o workspace...")
+        if not cfg.get("allow_empty_base"):
+            print("  (Para forçar sem base: \"allow_empty_base\": true — NÃO recomendado)")
+            sys.exit(1)
+        print("  Continuando com allow_empty_base=true — resultados NÃO confiáveis.")
 
     # base e workspace iguais = perigoso / sem sentido
     if base and cfg.get("workspace_path"):
@@ -173,6 +181,12 @@ def main() -> None:
             pass
 
     before = git_porcelain(base)
+    if before is None and cfg.get("require_git_integrity") and base and os.path.isdir(base):
+        print("ERRO: require_git_integrity=true mas a base não é um repo git válido.")
+        sys.exit(1)
+    if before is None and base and os.path.isdir(base):
+        print("AVISO: integridade git indisponível na base (sem .git ou git).")
+        print("  A ferramenta não grava na base, mas não há checagem automática.")
 
     try:
         session = engine.run(cfg)
@@ -196,7 +210,7 @@ def main() -> None:
         sys.exit(1)
 
     after = git_porcelain(base)
-    if before != after:
+    if before is not None and after is not None and before != after:
         print()
         print("ERRO DE INTEGRIDADE: git status do projeto base mudou após a execução.")
         print("O DBT Guardian não deveria alterar o repositório. Abortando finalização.")

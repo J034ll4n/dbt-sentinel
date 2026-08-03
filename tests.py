@@ -247,7 +247,6 @@ def test_hardening() -> None:
         open(inside, "w", encoding="utf-8").write("select 1")
         assert_true(engine.safe_relpath(inside, root) is not None, "safe_inside")
         outside = os.path.join(root, "..", "outside.sql")
-        # may or may not exist; abspath escapes root
         assert_true(engine.safe_relpath(outside, root) is None, "safe_outside")
 
         cfg_bad = {
@@ -260,7 +259,6 @@ def test_hardening() -> None:
         errs = engine.validate_config(cfg_bad)
         assert_true(any("aliases" in e for e in errs), "validate_aliases", str(errs))
 
-        # output inside base blocked
         base = os.path.join(root, "dbt")
         os.makedirs(base)
         cfg_nest = {
@@ -276,7 +274,6 @@ def test_hardening() -> None:
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
-    # XSS: HTML não deve conter </script> cru no JSON embutido
     evil = {
         "card_id": "CARD-X",
         "timestamp": "t",
@@ -296,6 +293,77 @@ def test_hardening() -> None:
     assert_true("\\u003c" in html or "&lt;" in html, "xss_escaped")
 
 
+def test_content_hash_not_false_igual() -> None:
+    """Mesmos refs/colunas mas WHERE diferente → ALTERADO, não IGUAL."""
+    a = engine.parse_sql("select id from {{ ref('stg') }} where a = 1")
+    b = engine.parse_sql("select id from {{ ref('stg') }} where a = 2")
+    assert_true(a["refs"] == b["refs"], "same_refs")
+    assert_true(a["content_hash"] != b["content_hash"], "diff_content_hash")
+    ma = {"hash": engine.structural_hash({**a, "name": "x"}), "content_hash": a["content_hash"],
+          "refs": a["refs"], "sources": a["sources"], "joins": a["joins"], "casts": a["casts"], "columns": a["columns"]}
+    mb = {"hash": engine.structural_hash({**b, "name": "x"}), "content_hash": b["content_hash"],
+          "refs": b["refs"], "sources": b["sources"], "joins": b["joins"], "casts": b["casts"], "columns": b["columns"]}
+    # structural may be equal
+    assert_true(not engine.models_equal(ma, mb), "not_equal_body")
+
+
+def test_yaml_models_not_sources() -> None:
+    yml = """
+version: 2
+models:
+  - name: stg_cliente
+    columns:
+      - name: id
+      - name: nome
+sources:
+  - name: crm
+    tables:
+      - name: cliente
+"""
+    p = engine.parse_yaml(yml)
+    assert_true(["crm", "cliente"] in [list(x) for x in p["sources"]], "yaml_source_ok", str(p["sources"]))
+    assert_true(["stg_cliente", "id"] not in [list(x) for x in p["sources"]], "yaml_no_col_as_source", str(p["sources"]))
+    assert_true("stg_cliente" in p.get("yaml_models", []) or "stg_cliente" in p.get("columns", []),
+                "yaml_model_listed", str(p))
+
+
+def test_exclusive_rename_no_double_claim() -> None:
+    root = tempfile.mkdtemp(prefix="dbt_ex_")
+    try:
+        base = os.path.join(root, "base")
+        ws = os.path.join(root, "ws")
+        os.makedirs(os.path.join(base, "models", "staging"))
+        os.makedirs(os.path.join(ws, "models", "staging"))
+        open(os.path.join(base, "models", "staging", "stg_cliente.sql"), "w", encoding="utf-8").write(
+            "select id, nome from {{ source('crm', 'cliente') }}\n"
+        )
+        # ZIP traz o nome certo E um nome parecido — não deve renomear o parecido para o mesmo
+        open(os.path.join(ws, "models", "staging", "stg_cliente.sql"), "w", encoding="utf-8").write(
+            "select id, nome from {{ source('crm', 'cliente') }}\n"
+        )
+        open(os.path.join(ws, "models", "staging", "stg_client.sql"), "w", encoding="utf-8").write(
+            "select id, nome from {{ source('crm', 'cliente') }}\n"
+        )
+        cfg = {
+            "base_project_path": base,
+            "workspace_path": ws,
+            "output_path": os.path.join(root, "o"),
+            "snapshots_path": os.path.join(root, "s"),
+            "card_id": "T",
+            "detect_removed": False,
+            "match_threshold": 0.55,
+            "aliases": {},
+        }
+        os.makedirs(cfg["output_path"])
+        os.makedirs(cfg["snapshots_path"])
+        s = engine.run(cfg)
+        by = {c["name"]: c for c in s["checklist"]}
+        assert_true(by["stg_cliente"]["status"] in {"IGUAL", "ALTERADO"}, "exact_wins", by["stg_cliente"]["status"])
+        assert_true(by["stg_client"]["status"] == "NOVO", "no_double_rename", by["stg_client"]["status"])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> None:
     print("=== DBT Guardian tests ===")
     test_parse_sql()
@@ -305,6 +373,9 @@ def main() -> None:
     test_integration()
     test_rename_detection()
     test_hardening()
+    test_content_hash_not_false_igual()
+    test_yaml_models_not_sources()
+    test_exclusive_rename_no_double_claim()
     print()
     print(f"Passed: {passed}  Failed: {failed}")
     if failed:

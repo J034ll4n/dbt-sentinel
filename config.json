@@ -6,5 +6,7 @@
   "card_id": "CARD-100",
   "detect_removed": false,
   "match_threshold": 0.62,
-  "aliases": {}
+  "aliases": {},
+  "allow_empty_base": false,
+  "require_git_integrity": false
 }

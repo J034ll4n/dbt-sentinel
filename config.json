@@ -4,5 +4,7 @@
   "output_path": "C:\\Users\\zirn1\\novo\\output",
   "snapshots_path": "C:\\Users\\zirn1\\novo\\snapshots",
   "card_id": "CARD-100",
-  "detect_removed": false
+  "detect_removed": false,
+  "match_threshold": 0.62,
+  "aliases": {}
 }

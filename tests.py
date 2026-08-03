@@ -172,12 +172,139 @@ def test_integration() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_name_matching() -> None:
+    assert_true(engine.name_similarity("stg_clientes", "stg_cliente") >= 0.85, "normalize_plural")
+    assert_true(engine.name_similarity("stg_client", "stg_cliente") >= 0.75, "name_sim_client")
+    assert_true(engine.name_similarity("fct_vendas", "stg_cliente") < 0.5, "name_sim_unrelated")
+    # não misturar sample com stg só pelo núcleo "cliente"
+    assert_true(engine.name_similarity("sample_cliente", "stg_cliente") < 0.85, "no_cross_prefix")
+
+    a = {"name": "stg_client", "layer": "staging", "refs": [], "sources": [["crm", "cliente"]],
+         "columns": ["id", "nome"], "hash": "aaa"}
+    b = {"name": "stg_cliente", "layer": "staging", "refs": [], "sources": [["crm", "cliente"]],
+         "columns": ["id", "nome"], "hash": "aaa"}
+    score, reasons = engine.match_score(a, b)
+    assert_true(score >= 0.7, "match_score_high", f"{score} {reasons}")
+
+
+def test_rename_detection() -> None:
+    root = tempfile.mkdtemp(prefix="dbt_ren_")
+    try:
+        base = os.path.join(root, "base")
+        ws = os.path.join(root, "ws")
+        for d in [
+            os.path.join(base, "models", "staging"),
+            os.path.join(ws, "models", "staging"),
+        ]:
+            os.makedirs(d, exist_ok=True)
+        with open(os.path.join(base, "models", "staging", "stg_cliente.sql"), "w", encoding="utf-8") as f:
+            f.write("select id, nome from {{ source('crm', 'cliente') }}\n")
+        # ZIP usa nome em inglês — mesma estrutura
+        with open(os.path.join(ws, "models", "staging", "stg_client.sql"), "w", encoding="utf-8") as f:
+            f.write("select id, nome, email from {{ source('crm', 'cliente') }}\n")
+
+        cfg = {
+            "base_project_path": base,
+            "workspace_path": ws,
+            "output_path": os.path.join(root, "out"),
+            "snapshots_path": os.path.join(root, "snap"),
+            "card_id": "CARD-REN",
+            "detect_removed": False,
+            "aliases": {},
+            "match_threshold": 0.55,
+        }
+        os.makedirs(cfg["output_path"], exist_ok=True)
+        os.makedirs(cfg["snapshots_path"], exist_ok=True)
+        s = engine.run(cfg)
+        names = {c["name"]: c for c in s["checklist"]}
+        assert_true("stg_client" in names, "rename.has_ws_name")
+        item = names["stg_client"]
+        assert_true(item["status"] == "RENOMEADO", "rename.status", item["status"])
+        assert_true(item.get("match_name") == "stg_cliente", "rename.match", str(item.get("match_name")))
+        assert_true(s["summary"]["renomeado"] >= 1, "rename.summary")
+
+        # alias forçado
+        cfg["aliases"] = {"stg_client": "stg_cliente"}
+        s2 = engine.run(cfg)
+        item2 = {c["name"]: c for c in s2["checklist"]}["stg_client"]
+        assert_true(item2["status"] in {"ALTERADO", "IGUAL", "RENOMEADO"}, "alias.status", item2["status"])
+        assert_true(item2.get("match_name") == "stg_cliente" or "Alias" in str(item2.get("diff")),
+                    "alias.linked", str(item2))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_hardening() -> None:
+    assert_true(engine.sanitize_card_id("../../etc") == "CARD-XXX" or ".." not in engine.sanitize_card_id("../../etc"),
+                "sanitize_dotdot")
+    assert_true("/" not in engine.sanitize_card_id("CARD/100") and "\\" not in engine.sanitize_card_id("CARD\\100"),
+                "sanitize_slash")
+    assert_true(engine.sanitize_card_id("CARD-100") == "CARD-100", "sanitize_ok")
+
+    root = tempfile.mkdtemp(prefix="dbt_safe_")
+    try:
+        inside = os.path.join(root, "a.sql")
+        open(inside, "w", encoding="utf-8").write("select 1")
+        assert_true(engine.safe_relpath(inside, root) is not None, "safe_inside")
+        outside = os.path.join(root, "..", "outside.sql")
+        # may or may not exist; abspath escapes root
+        assert_true(engine.safe_relpath(outside, root) is None, "safe_outside")
+
+        cfg_bad = {
+            "workspace_path": root,
+            "output_path": os.path.join(root, "out"),
+            "snapshots_path": os.path.join(root, "snap"),
+            "base_project_path": root,
+            "aliases": "nope",
+        }
+        errs = engine.validate_config(cfg_bad)
+        assert_true(any("aliases" in e for e in errs), "validate_aliases", str(errs))
+
+        # output inside base blocked
+        base = os.path.join(root, "dbt")
+        os.makedirs(base)
+        cfg_nest = {
+            "workspace_path": os.path.join(root, "ws"),
+            "output_path": os.path.join(base, "out"),
+            "snapshots_path": os.path.join(root, "snap"),
+            "base_project_path": base,
+            "aliases": {},
+            "match_threshold": 0.62,
+        }
+        errs2 = engine.validate_config(cfg_nest)
+        assert_true(any("output_path" in e for e in errs2), "validate_nest", str(errs2))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # XSS: HTML não deve conter </script> cru no JSON embutido
+    evil = {
+        "card_id": "CARD-X",
+        "timestamp": "t",
+        "summary": {"novo": 0, "alterado": 0, "removido": 0, "renomeado": 0, "igual": 0,
+                    "pending": 0, "critical": 0, "warning": 0, "base_models": 0, "workspace_models": 0},
+        "message": "</script><script>alert(1)</script>",
+        "checklist": [],
+        "warnings": [],
+        "order": [],
+        "flow_chains": [],
+        "timeline": [],
+        "patterns": {},
+        "empty_workspace": True,
+    }
+    html = ui.render(evil)
+    assert_true("</script><script>" not in html, "xss_script_break")
+    assert_true("\\u003c" in html or "&lt;" in html, "xss_escaped")
+
+
 def main() -> None:
     print("=== DBT Guardian tests ===")
     test_parse_sql()
     test_hash()
     test_cycles_downstream()
+    test_name_matching()
     test_integration()
+    test_rename_detection()
+    test_hardening()
     print()
     print(f"Passed: {passed}  Failed: {failed}")
     if failed:

@@ -24,7 +24,11 @@ Edite `config.json` com o caminho absoluto do repositório DBT corporativo:
   "output_path": "C:\\Users\\zirn1\\novo\\output",
   "snapshots_path": "C:\\Users\\zirn1\\novo\\snapshots",
   "card_id": "CARD-100",
-  "detect_removed": false
+  "detect_removed": false,
+  "match_threshold": 0.62,
+  "aliases": {
+    "stg_client": "stg_cliente"
+  }
 }
 ```
 
@@ -32,6 +36,8 @@ Edite `config.json` com o caminho absoluto do repositório DBT corporativo:
 - `workspace_path` = onde você extrai o ZIP do Jira
 - `card_id` = número do card atual
 - `detect_removed` = `false` por padrão (ZIP do Jira é parcial — não marca o resto do repo como “removido”)
+- `aliases` = mapa nome-do-ZIP → nome-no-projeto (quando a IA muda o nome)
+- `match_threshold` = sensibilidade do detector automático de renomeação (0.0–1.0)
 
 Comando:
 
@@ -77,8 +83,29 @@ Abra `output\index.html` e siga as 4 abas.
 |--------|---------|-------------|
 | NOVO | **Criar arquivo** | Copiar do `workspace/` para o caminho indicado no projeto |
 | ALTERADO | **Atualizar arquivo** | O arquivo já existe — aplique as mudanças (veja “O que mudou”) |
+| RENOMEADO | **Nome diferente** | A IA usou outro nome, mas é o mesmo objeto — **não crie duplicado** |
 | REMOVIDO | **Verificar remoção** | Sumiu do pacote — confirme se é intencional e veja quem depende |
 | IGUAL | **Pronto** | Nada a fazer |
+
+### Quando a IA usa nomes diferentes
+
+Três camadas de proteção:
+
+1. **Aliases manuais** em `config.json` — quando você já sabe o mapeamento:
+   ```json
+   "aliases": {
+     "stg_client": "stg_cliente",
+     "int_customer": "int_cliente"
+   }
+   ```
+2. **Similaridade de nome** — `stg_client` ≈ `stg_cliente` (stdlib `difflib`)
+3. **Fingerprint estrutural** — mesmos `ref`/`source`/colunas ⇒ mesmo objeto mesmo com nome bem diferente
+
+Se casar, o status fica **RENOMEADO** com confiança % e o path do arquivo **já existente** no projeto.  
+Ajuste `match_threshold` (padrão `0.62`) se estiver com falsos positivos/negativos.
+
+A detecção automática só compara modelos da **mesma camada** (staging com staging).  
+Para mapear entre camadas ou casos difíceis, use `aliases` no `config.json`.
 
 ### Regra de ouro
 
@@ -144,9 +171,22 @@ Se houver itens pendentes, pede confirmação extra.
 - Não substitui a validação final no SaaS e no BQ
 - Não instala bibliotecas (stdlib only)
 
+## 10. Blindagem (segurança e integridade)
+
+| Proteção | Detalhe |
+|----------|---------|
+| Somente leitura na base | `git status` antes/depois; aborta se mudar |
+| Escrita restrita | Só grava em `output/` e `snapshots/` |
+| Paths seguros | Bloqueia path traversal e symlinks fora da pasta |
+| card_id limpo | Impede `../` em nomes de snapshot |
+| XSS no HTML | JSON embutido com escape `\u003c` |
+| Arquivos grandes | Ignora > 2 MB; limite de 20k arquivos |
+| Config validada | Recusa output/snapshots dentro do projeto DBT |
+| Aliases tipados | Objeto string→string obrigatório |
+
 ---
 
-## 10. Arquivos do projeto
+## 11. Arquivos do projeto
 
 ```
 main.py      → execute este

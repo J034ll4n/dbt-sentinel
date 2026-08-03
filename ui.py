@@ -15,12 +15,14 @@ def _badge(status: str) -> str:
         "NOVO": "new",
         "ALTERADO": "warn",
         "REMOVIDO": "block",
+        "RENOMEADO": "rename",
         "IGUAL": "ok",
     }.get(status, "ok")
     labels = {
         "NOVO": "Criar",
         "ALTERADO": "Atualizar",
         "REMOVIDO": "Verificar",
+        "RENOMEADO": "Nome diferente",
         "IGUAL": "Pronto",
     }
     return f'<span class="badge {cls}">{_esc(labels.get(status, status))}</span>'
@@ -39,12 +41,20 @@ def _cards(checklist: list) -> str:
         diff_html = ""
         if c.get("diff"):
             items = "".join(f"<li>{_esc(d)}</li>" for d in c["diff"])
-            diff_html = f"<p><strong>O que mudou:</strong></p><ul>{items}</ul>"
+            diff_html = f"<p><strong>O que mudou / por que casou:</strong></p><ul>{items}</ul>"
+        match_html = ""
+        if c.get("match_name"):
+            score = int((c.get("match_score") or 0) * 100)
+            match_html = (
+                f"<p class=\"match\"><strong>No projeto já existe:</strong> "
+                f"<code>{_esc(c['match_name'])}</code> "
+                f"(confiança {score}%) — use este caminho, não crie duplicado.</p>"
+            )
         impact = ""
         if c.get("impact"):
             lis = "".join(f"<li>{_esc(i)}</li>" for i in c["impact"][:12])
             impact = f"<p><strong>Se alterar, estes podem quebrar:</strong></p><ul>{lis}</ul>"
-        elif c["status"] in {"ALTERADO", "REMOVIDO"}:
+        elif c["status"] in {"ALTERADO", "REMOVIDO", "RENOMEADO"}:
             impact = "<p><em>Ninguém depende deste arquivo.</em></p>"
 
         done = "checked" if c.get("done") else ""
@@ -57,6 +67,7 @@ def _cards(checklist: list) -> str:
     <h3>{cid}</h3>
   </header>
   <p class="hint">{_esc(c.get('hint',''))}</p>
+  {match_html}
   <p><strong>Onde:</strong> <code title="{_esc(c.get('path',''))}">{_esc(c.get('path',''))}</code></p>
   <p><strong>Camada:</strong> {_esc(c.get('layer',''))}
      · <strong>Ordem sugerida:</strong> {_esc(c.get('suggested_order', '—'))}</p>
@@ -93,6 +104,7 @@ def _wizard(session: dict) -> str:
     novos = [c for c in session["checklist"] if c["status"] == "NOVO"]
     alts = [c for c in session["checklist"] if c["status"] == "ALTERADO"]
     rems = [c for c in session["checklist"] if c["status"] == "REMOVIDO"]
+    renames = [c for c in session["checklist"] if c["status"] == "RENOMEADO"]
 
     def step(num, title, count, items_html, cls=""):
         mark = "✓" if count == 0 else f"{count} pendente(s)"
@@ -115,7 +127,13 @@ def _wizard(session: dict) -> str:
         if not items:
             return f"<p class=\"ok-msg\">Nenhum arquivo para {verb}.</p>"
         lis = "".join(
-            f"<li><code>{_esc(i['name'])}</code> → <code>{_esc(i['path'])}</code></li>"
+            f"<li><code>{_esc(i['name'])}</code> → <code>{_esc(i['path'])}</code>"
+            + (
+                f" <em>(= {_esc(i.get('match_name'))})</em>"
+                if i.get("match_name")
+                else ""
+            )
+            + "</li>"
             for i in items
         )
         return f"<ul>{lis}</ul>"
@@ -126,11 +144,22 @@ def _wizard(session: dict) -> str:
         lis = "".join(f"<li>{i+1}. <code>{_esc(n)}</code></li>" for i, n in enumerate(order))
         order_html = f"<p><strong>Ordem sugerida (do início ao fim do fluxo):</strong></p><ol>{lis}</ol>"
 
+    rename_html = mini(renames, "alinhar nome")
+    if renames:
+        rename_html = (
+            "<p class=\"hint\">Atenção: não crie arquivo novo — atualize o que já existe no projeto.</p>"
+            + rename_html
+        )
+
     return (
         step(1, "Resolver bloqueios", s["critical"], c_html, "step-block" if s["critical"] else "")
         + step(2, "Criar arquivos novos", len(novos), mini(novos, "criar") + order_html)
-        + step(3, "Atualizar / verificar existentes", len(alts) + len(rems),
-               mini(alts, "atualizar") + mini(rems, "verificar"))
+        + step(
+            3,
+            "Atualizar / nomes diferentes / verificar",
+            len(alts) + len(rems) + len(renames),
+            mini(alts, "atualizar") + rename_html + mini(rems, "verificar"),
+        )
         + """
 <section class="step">
   <h3>Passo 4 — Validar no SaaS e BigQuery</h3>
@@ -204,12 +233,20 @@ def _alerts(session: dict) -> str:
 
 def render(session: dict) -> str:
     s = session["summary"]
-    total = s["pending"] + s["igual"]
-    done_auto = s["igual"]
+    total = s.get("pending", 0) + s.get("igual", 0)
+    done_auto = s.get("igual", 0)
     pct = int(100 * done_auto / total) if total else 100
     msg = session.get("message") or ""
     card = _esc(session.get("card_id", "CARD"))
-    data = json.dumps(session, ensure_ascii=False)
+    # Blindagem XSS: JSON embutido não pode fechar a tag <script>
+    data = (
+        json.dumps(session, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -281,7 +318,10 @@ header.app .sub {{ color:var(--muted); }}
 .badge.new {{ background:var(--new); }}
 .badge.warn {{ background:var(--warn); color:#1a1a1a; }}
 .badge.block {{ background:var(--block); }}
+.badge.rename {{ background:#a855f7; }}
 .badge.info {{ background:var(--info); }}
+.card.status-renomeado {{ border-top-color:#a855f7; }}
+.match {{ color:#e9d5ff; }}
 .step {{
   background:var(--panel); border:1px solid var(--line); border-radius:12px;
   padding:1rem 1.2rem; margin-bottom:1rem;
@@ -332,12 +372,13 @@ footer {{
   <div class="sub">Card <strong>{card}</strong> · {_esc(session.get('timestamp',''))}</div>
   <div class="progress" title="Arquivos já iguais / total"><span></span></div>
   <div class="stats">
-    <div class="stat">Criar: <b>{s['novo']}</b></div>
-    <div class="stat">Atualizar: <b>{s['alterado']}</b></div>
-    <div class="stat">Verificar: <b>{s['removido']}</b></div>
-    <div class="stat">Pronto: <b>{s['igual']}</b></div>
-    <div class="stat">Bloqueios: <b>{s['critical']}</b></div>
-    <div class="stat">Pendentes: <b>{s['pending']}</b></div>
+    <div class="stat">Criar: <b>{s.get('novo', 0)}</b></div>
+    <div class="stat">Atualizar: <b>{s.get('alterado', 0)}</b></div>
+    <div class="stat">Nome ≠: <b>{s.get('renomeado', 0)}</b></div>
+    <div class="stat">Verificar: <b>{s.get('removido', 0)}</b></div>
+    <div class="stat">Pronto: <b>{s.get('igual', 0)}</b></div>
+    <div class="stat">Bloqueios: <b>{s.get('critical', 0)}</b></div>
+    <div class="stat">Pendentes: <b>{s.get('pending', 0)}</b></div>
   </div>
 </header>
 

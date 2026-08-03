@@ -20,13 +20,41 @@ def load_config() -> dict:
     if not os.path.isfile(CONFIG_PATH):
         print(f"ERRO: config.json não encontrado em {CONFIG_PATH}")
         sys.exit(1)
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"ERRO: config.json inválido: {e}")
+        sys.exit(1)
+
+    if not isinstance(cfg, dict):
+        print("ERRO: config.json deve ser um objeto JSON")
+        sys.exit(1)
+
     # paths relativos → absolutos a partir da pasta do Guardian
-    for key in ("workspace_path", "output_path", "snapshots_path"):
+    for key in ("workspace_path", "output_path", "snapshots_path", "base_project_path"):
         p = cfg.get(key, "")
-        if p and not os.path.isabs(p):
-            cfg[key] = os.path.join(ROOT, p)
+        if p and isinstance(p, str) and not os.path.isabs(p):
+            cfg[key] = os.path.abspath(os.path.join(ROOT, p))
+        elif p and isinstance(p, str):
+            cfg[key] = os.path.abspath(p)
+
+    cfg["card_id"] = engine.sanitize_card_id(cfg.get("card_id", "CARD-XXX"))
+    if "aliases" not in cfg or cfg["aliases"] is None:
+        cfg["aliases"] = {}
+    if "match_threshold" not in cfg:
+        cfg["match_threshold"] = 0.62
+    if "detect_removed" not in cfg:
+        cfg["detect_removed"] = False
+
+    errors = engine.validate_config(cfg)
+    if errors:
+        print("ERRO de configuração:")
+        for e in errors:
+            print(f"  - {e}")
+        sys.exit(1)
+
+    # só cria pastas do Guardian — nunca dentro do base
     for key in ("workspace_path", "output_path", "snapshots_path"):
         os.makedirs(cfg[key], exist_ok=True)
     return cfg
@@ -37,14 +65,15 @@ def git_porcelain(repo: str) -> str:
         return ""
     git_dir = os.path.join(repo, ".git")
     if not os.path.isdir(git_dir):
-        return ""  # sem git — não bloqueia
+        return ""
     try:
         out = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "-c", "safe.directory=*", "status", "--porcelain"],
             cwd=repo,
             capture_output=True,
             text=True,
             timeout=30,
+            shell=False,
         )
         if out.returncode != 0:
             return ""
@@ -53,9 +82,23 @@ def git_porcelain(repo: str) -> str:
         return ""
 
 
+def assert_write_target(path: str, allowed_roots: list[str]) -> None:
+    """Garante que só gravamos em output/ ou snapshots/."""
+    abs_path = os.path.abspath(path)
+    for root in allowed_roots:
+        root_abs = os.path.abspath(root)
+        try:
+            if os.path.commonpath([root_abs, abs_path]) == root_abs:
+                return
+        except ValueError:
+            continue
+    raise RuntimeError(f"Bloqueado: tentativa de gravar fora de output/snapshots: {abs_path}")
+
+
 def save_snapshot(cfg: dict, session: dict) -> str:
-    card = session.get("card_id", "CARD-XXX")
+    card = engine.sanitize_card_id(session.get("card_id", "CARD-XXX"))
     dest = os.path.join(cfg["snapshots_path"], card)
+    assert_write_target(dest, [cfg["snapshots_path"]])
     os.makedirs(dest, exist_ok=True)
     manifest = {
         "card_id": card,
@@ -65,6 +108,7 @@ def save_snapshot(cfg: dict, session: dict) -> str:
                 "model": c["name"],
                 "status": c["status"],
                 "path": c.get("path", ""),
+                "match_name": c.get("match_name"),
             }
             for c in session.get("checklist", [])
             if c["status"] != "IGUAL"
@@ -72,6 +116,7 @@ def save_snapshot(cfg: dict, session: dict) -> str:
         "critical_count": session["summary"].get("critical", 0),
         "warning_count": session["summary"].get("warning", 0),
         "pending_count": session["summary"].get("pending", 0),
+        "renomeado_count": session["summary"].get("renomeado", 0),
         "structural_hashes": {
             c["name"]: c.get("hash", "")
             for c in session.get("checklist", [])
@@ -79,6 +124,7 @@ def save_snapshot(cfg: dict, session: dict) -> str:
         },
     }
     path = os.path.join(dest, "manifest.json")
+    assert_write_target(path, [cfg["snapshots_path"]])
     with open(path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
     return path
@@ -94,6 +140,7 @@ def print_summary(session: dict) -> None:
     print(f"  Workspace: {s['workspace_models']} arquivo(s)")
     print(f"  Criar:     {s['novo']}")
     print(f"  Atualizar: {s['alterado']}")
+    print(f"  Nome ≠:    {s.get('renomeado', 0)}")
     print(f"  Verificar: {s['removido']}")
     print(f"  Pronto:    {s['igual']}")
     print(f"  Bloqueios: {s['critical']}")
@@ -116,19 +163,37 @@ def main() -> None:
         print("  Edite config.json com o caminho absoluto do repositório DBT.")
         print("  Continuando só com o workspace...")
 
+    # base e workspace iguais = perigoso / sem sentido
+    if base and cfg.get("workspace_path"):
+        try:
+            if os.path.abspath(base) == os.path.abspath(cfg["workspace_path"]):
+                print("ERRO: base_project_path e workspace_path não podem ser a mesma pasta.")
+                sys.exit(1)
+        except OSError:
+            pass
+
     before = git_porcelain(base)
 
-    session = engine.run(cfg)
+    try:
+        session = engine.run(cfg)
+    except Exception as e:
+        print(f"ERRO na análise: {type(e).__name__}: {e}")
+        sys.exit(1)
 
     out_dir = cfg["output_path"]
     session_path = os.path.join(out_dir, "session.json")
     html_path = os.path.join(out_dir, "index.html")
 
-    with open(session_path, "w", encoding="utf-8") as f:
-        json.dump(session, f, ensure_ascii=False, indent=2)
-
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(ui.render(session))
+    try:
+        assert_write_target(session_path, [out_dir])
+        assert_write_target(html_path, [out_dir])
+        with open(session_path, "w", encoding="utf-8") as f:
+            json.dump(session, f, ensure_ascii=False, indent=2)
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(ui.render(session))
+    except (OSError, RuntimeError) as e:
+        print(f"ERRO ao gravar relatório: {e}")
+        sys.exit(1)
 
     after = git_porcelain(base)
     if before != after:
@@ -150,7 +215,12 @@ def main() -> None:
 
     s = session["summary"]
     print()
-    ans = input(f"Finalizar card {session.get('card_id')} e salvar snapshot? (S/N): ").strip().upper()
+    try:
+        ans = input(f"Finalizar card {session.get('card_id')} e salvar snapshot? (S/N): ").strip().upper()
+    except EOFError:
+        print("Entrada indisponível — snapshot não salvo.")
+        return
+
     if ans != "S":
         print("Snapshot não salvo. Limpe workspace/ quando terminar o card.")
         return
@@ -161,12 +231,19 @@ def main() -> None:
         return
     if s["pending"] > 0:
         print(f"Aviso: ainda há {s['pending']} item(ns) pendente(s) no checklist.")
-        conf = input("Finalizar mesmo assim? (S/N): ").strip().upper()
+        try:
+            conf = input("Finalizar mesmo assim? (S/N): ").strip().upper()
+        except EOFError:
+            conf = "N"
         if conf != "S":
             print("Snapshot cancelado.")
             return
 
-    path = save_snapshot(cfg, session)
+    try:
+        path = save_snapshot(cfg, session)
+    except (OSError, RuntimeError) as e:
+        print(f"ERRO ao salvar snapshot: {e}")
+        sys.exit(1)
     print(f"Snapshot salvo em: {path}")
     print("Limpe a pasta workspace/ e atualize card_id no config.json para o próximo card.")
 

@@ -8,9 +8,74 @@ import os
 import re
 from collections import Counter, defaultdict, deque
 from datetime import datetime
+from difflib import SequenceMatcher
 
 IGNORE_DIRS = {".git", "target", "dbt_packages", "logs", "__pycache__", ".venv", "node_modules"}
 EXTS = {".sql", ".yml", ".yaml", ".csv"}
+MAX_FILE_BYTES = 2_000_000  # 2 MB — evita travar VDI com monstro
+MAX_FILES_PER_PROJECT = 20_000
+
+
+def safe_relpath(path: str, root: str) -> str | None:
+    """Garante que path está dentro de root (bloqueia path traversal / symlink escape)."""
+    try:
+        root_abs = os.path.abspath(root)
+        path_abs = os.path.abspath(path)
+        common = os.path.commonpath([root_abs, path_abs])
+        if common != root_abs:
+            return None
+        return os.path.relpath(path_abs, root_abs).replace("\\", "/")
+    except (ValueError, OSError):
+        return None
+
+
+def sanitize_card_id(card_id: str) -> str:
+    """Impede card_id com ../ ou caracteres de path."""
+    raw = (card_id or "CARD-XXX").strip()
+    clean = re.sub(r"[^\w.\-]+", "_", raw, flags=re.UNICODE)
+    clean = clean.strip("._") or "CARD-XXX"
+    if clean in {".", ".."} or ".." in clean:
+        return "CARD-XXX"
+    return clean[:80]
+
+
+def validate_config(config: dict) -> list[str]:
+    """Retorna lista de erros fatais de configuração."""
+    errors = []
+    if not isinstance(config, dict):
+        return ["config.json deve ser um objeto JSON"]
+    for key in ("workspace_path", "output_path", "snapshots_path"):
+        if not config.get(key):
+            errors.append(f"Falta {key} no config.json")
+    aliases = config.get("aliases", {})
+    if aliases is None:
+        aliases = {}
+    if not isinstance(aliases, dict):
+        errors.append("aliases deve ser um objeto {nome_zip: nome_projeto}")
+    else:
+        for k, v in aliases.items():
+            if not isinstance(k, str) or not isinstance(v, str) or not k or not v:
+                errors.append(f"alias inválido: {k!r} -> {v!r}")
+                break
+    thr = config.get("match_threshold", 0.62)
+    try:
+        thr_f = float(thr)
+        if not 0.0 <= thr_f <= 1.0:
+            errors.append("match_threshold deve estar entre 0 e 1")
+    except (TypeError, ValueError):
+        errors.append("match_threshold deve ser número")
+    base = config.get("base_project_path") or ""
+    out = os.path.abspath(config.get("output_path") or "")
+    snap = os.path.abspath(config.get("snapshots_path") or "")
+    ws = os.path.abspath(config.get("workspace_path") or "")
+    if base and os.path.isdir(base):
+        base_abs = os.path.abspath(base)
+        for label, p in (("output_path", out), ("snapshots_path", snap), ("workspace_path", ws)):
+            if p and (p == base_abs or p.startswith(base_abs + os.sep)):
+                errors.append(
+                    f"{label} não pode ficar dentro do projeto base (risco de gravar no DBT)"
+                )
+    return errors
 
 RE_REF = re.compile(r"""\{\{\s*ref\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\}\}""", re.I)
 RE_SOURCE = re.compile(
@@ -44,6 +109,7 @@ ACTION_LABEL = {
     "NOVO": "Criar arquivo",
     "ALTERADO": "Atualizar arquivo",
     "REMOVIDO": "Verificar remoção",
+    "RENOMEADO": "Mesmo objeto, nome diferente",
     "IGUAL": "Pronto",
 }
 
@@ -51,6 +117,10 @@ ACTION_HINT = {
     "NOVO": "Este arquivo ainda não existe no projeto. Copie do workspace para o caminho indicado.",
     "ALTERADO": "Este arquivo já existe e mudou. Aplique as alterações no arquivo do projeto.",
     "REMOVIDO": "Este arquivo sumiu do pacote. Confirme se a remoção é intencional.",
+    "RENOMEADO": (
+        "A IA/ZIP usou outro nome, mas o conteúdo parece o mesmo objeto já existente. "
+        "NÃO crie duplicado — atualize o arquivo do projeto ou alinhe o nome."
+    ),
     "IGUAL": "Nada a fazer — já está igual ao projeto.",
 }
 
@@ -92,13 +162,112 @@ def scan_dir(root: str) -> list[str]:
     found = []
     if not root or not os.path.isdir(root):
         return found
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
+    root_abs = os.path.abspath(root)
+    for dirpath, dirnames, filenames in os.walk(root_abs, followlinks=False):
+        # nunca seguir para fora do root
+        if safe_relpath(dirpath, root_abs) is None:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS and not d.startswith(".")]
         for name in filenames:
+            if name.startswith("."):
+                continue
             ext = os.path.splitext(name)[1].lower()
-            if ext in EXTS:
-                found.append(os.path.join(dirpath, name))
+            if ext not in EXTS:
+                continue
+            full = os.path.join(dirpath, name)
+            if safe_relpath(full, root_abs) is None:
+                continue
+            try:
+                if os.path.islink(full):
+                    continue
+                if os.path.getsize(full) > MAX_FILE_BYTES:
+                    continue
+            except OSError:
+                continue
+            found.append(full)
+            if len(found) >= MAX_FILES_PER_PROJECT:
+                return found
     return found
+
+
+def parse_file(path: str, root: str) -> dict | None:
+    rel = safe_relpath(path, root)
+    if rel is None:
+        return None
+    name = os.path.splitext(os.path.basename(path))[0]
+    if not name or name in {".", ".."}:
+        return None
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read(MAX_FILE_BYTES + 1)
+        if len(text) > MAX_FILE_BYTES:
+            return None
+    except OSError:
+        return None
+
+    if ext == ".sql":
+        parsed = parse_sql(text)
+        kind = "model"
+    elif ext in {".yml", ".yaml"}:
+        parsed = parse_yaml(text)
+        kind = "yaml"
+        if parsed.get("sources"):
+            kind = "source"
+    elif ext == ".csv":
+        parsed = {"refs": [], "sources": [], "joins": [], "casts": [], "columns": []}
+        kind = "seed"
+    else:
+        return None
+
+    model = {
+        "name": name,
+        "path": rel,
+        "abs_path": os.path.abspath(path),
+        "type": kind,
+        "layer": detect_layer(rel),
+        "refs": parsed.get("refs", []),
+        "sources": parsed.get("sources", []),
+        "joins": parsed.get("joins", []),
+        "casts": parsed.get("casts", []),
+        "columns": parsed.get("columns", []),
+    }
+    model["hash"] = structural_hash(model)
+    return model
+
+
+def load_project(root: str) -> dict[str, dict]:
+    models: dict[str, dict] = {}
+    collisions: list[str] = []
+    if not root or not os.path.isdir(root):
+        return models
+    for path in scan_dir(root):
+        m = parse_file(path, root)
+        if not m:
+            continue
+        key = m["name"]
+        if key in models:
+            prev = models[key]
+            # preferir .sql / model sobre yaml
+            if prev["type"] == "model" and m["type"] != "model":
+                collisions.append(key)
+                continue
+            if m["type"] == "model" and prev["type"] != "model":
+                collisions.append(key)
+                models[key] = m
+                continue
+            collisions.append(key)
+            # mesmo tipo: mantém o primeiro, anota colisão no path do vencedor
+            prev.setdefault("collisions", []).append(m["path"])
+            continue
+        models[key] = m
+    if collisions:
+        # marca no primeiro modelo para o validate avisar
+        for key in set(collisions):
+            if key in models:
+                models[key].setdefault("name_collision", True)
+    return models
 
 
 def parse_sql(text: str) -> dict:
@@ -174,60 +343,6 @@ def structural_hash(model: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def parse_file(path: str, root: str) -> dict | None:
-    rel = os.path.relpath(path, root).replace("\\", "/")
-    name = os.path.splitext(os.path.basename(path))[0]
-    ext = os.path.splitext(path)[1].lower()
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-    except OSError:
-        return None
-
-    if ext == ".sql":
-        parsed = parse_sql(text)
-        kind = "model"
-    elif ext in {".yml", ".yaml"}:
-        parsed = parse_yaml(text)
-        kind = "yaml"
-        if parsed.get("sources"):
-            kind = "source"
-    elif ext == ".csv":
-        parsed = {"refs": [], "sources": [], "joins": [], "casts": [], "columns": []}
-        kind = "seed"
-    else:
-        return None
-
-    model = {
-        "name": name,
-        "path": rel,
-        "abs_path": path,
-        "type": kind,
-        "layer": detect_layer(rel),
-        "refs": parsed.get("refs", []),
-        "sources": parsed.get("sources", []),
-        "joins": parsed.get("joins", []),
-        "casts": parsed.get("casts", []),
-        "columns": parsed.get("columns", []),
-    }
-    model["hash"] = structural_hash(model)
-    return model
-
-
-def load_project(root: str) -> dict[str, dict]:
-    models: dict[str, dict] = {}
-    for path in scan_dir(root):
-        m = parse_file(path, root)
-        if not m:
-            continue
-        # chave única: nome; se colisão, preferir .sql
-        key = m["name"]
-        if key in models and models[key]["type"] == "model" and m["type"] != "model":
-            continue
-        models[key] = m
-    return models
-
-
 def _set_diff(a: list, b: list) -> tuple[list, list]:
     sa, sb = set(map(_norm, a)), set(map(_norm, b))
     added = sorted(sb - sa)
@@ -258,12 +373,129 @@ def semantic_diff(base: dict, ws: dict) -> list[str]:
     return lines
 
 
-def compare(base: dict, ws: dict, detect_removed: bool = False) -> list[dict]:
+def split_prefix(name: str) -> tuple[str, str]:
+    n = (name or "").lower().strip()
+    for pref in ("stg_", "int_", "fct_", "dim_", "agg_", "sample_", "src_"):
+        if n.startswith(pref):
+            return pref, n[len(pref):]
+    return "", n
+
+
+def normalize_core(name: str) -> str:
+    """Núcleo do nome (sem prefixo), com singular leve."""
+    _, core = split_prefix(name)
+    core = core.replace("-", "_").replace(" ", "_")
+    if core.endswith("ies"):
+        core = core[:-3] + "y"
+    elif core.endswith("s") and not core.endswith("ss"):
+        core = core[:-1]
+    return core
+
+
+def name_similarity(a: str, b: str) -> float:
+    """Similaridade de nome. Só compara núcleos se o prefixo for da mesma família."""
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    al, bl = a.lower(), b.lower()
+    raw = SequenceMatcher(None, al, bl).ratio()
+    pa, _ = split_prefix(al)
+    pb, _ = split_prefix(bl)
+    # sample_cliente ≠ stg_cliente só porque o núcleo é "cliente"
+    if pa and pb and pa == pb:
+        norm = SequenceMatcher(None, normalize_core(al), normalize_core(bl)).ratio()
+        return max(raw, norm)
+    return raw
+
+
+def structure_similarity(a: dict, b: dict) -> float:
+    """Jaccard médio sobre refs, sources e columns."""
+    scores = []
+    for field in ("refs", "sources", "columns"):
+        sa = set(map(_norm, a.get(field, []) or []))
+        sb = set(map(_norm, b.get(field, []) or []))
+        if not sa and not sb:
+            continue
+        union = sa | sb
+        scores.append(len(sa & sb) / len(union) if union else 0.0)
+    if not scores:
+        return 1.0 if a.get("hash") and a.get("hash") == b.get("hash") else 0.0
+    return sum(scores) / len(scores)
+
+
+def match_score(ws_model: dict, base_model: dict) -> tuple[float, list[str]]:
+    """Score 0–1 + motivos legíveis."""
+    reasons = []
+    ns = name_similarity(ws_model.get("name", ""), base_model.get("name", ""))
+    ss = structure_similarity(ws_model, base_model)
+    same_layer = ws_model.get("layer") == base_model.get("layer")
+    same_hash = bool(ws_model.get("hash") and ws_model.get("hash") == base_model.get("hash"))
+
+    if same_hash:
+        reasons.append("estrutura idêntica (hash)")
+    if ns >= 0.7:
+        reasons.append(f"nome parecido ({int(ns * 100)}%)")
+    if ss >= 0.4:
+        reasons.append(f"refs/colunas parecidas ({int(ss * 100)}%)")
+    if same_layer:
+        reasons.append(f"mesma camada ({ws_model.get('layer')})")
+
+    score = 0.45 * ss + 0.35 * ns + (0.15 if same_layer else 0.0) + (0.2 if same_hash else 0.0)
+    score = min(1.0, score)
+    return score, reasons
+
+
+def find_best_match(ws_model: dict, base: dict, used: set, min_score: float = 0.62) -> dict | None:
+    """Encontra o melhor candidato na base para um modelo do workspace.
+
+    Só casa automaticamente dentro da mesma camada (sample ≠ stg).
+    Para cruzar camadas, use aliases no config.json.
+    """
+    best = None
+    best_score = 0.0
+    best_reasons: list[str] = []
+    for bname, bmodel in base.items():
+        if bname in used:
+            continue
+        if ws_model.get("layer") != bmodel.get("layer"):
+            continue
+        score, reasons = match_score(ws_model, bmodel)
+        if score > best_score:
+            best_score = score
+            best = bname
+            best_reasons = reasons
+    if best is None or best_score < min_score:
+        return None
+    return {"name": best, "score": round(best_score, 3), "reasons": best_reasons}
+
+
+def resolve_alias(name: str, aliases: dict) -> str | None:
+    """aliases: workspace_name -> base_name (ou o inverso)."""
+    if not aliases:
+        return None
+    if name in aliases:
+        return aliases[name]
+    # inverso
+    for ws_name, base_name in aliases.items():
+        if base_name == name:
+            return ws_name
+    return None
+
+
+def compare(
+    base: dict,
+    ws: dict,
+    detect_removed: bool = False,
+    aliases: dict | None = None,
+    match_threshold: float = 0.62,
+) -> list[dict]:
     """Compara workspace (ZIP) contra a base.
 
     Por padrão só avalia arquivos do workspace (ZIP parcial do Jira).
-    REMOVIDO só aparece se detect_removed=True.
+    Detecta nomes diferentes para o mesmo objeto via aliases + similaridade.
     """
+    aliases = aliases or {}
     names = set(ws)
     if detect_removed:
         names |= set(base)
@@ -273,15 +505,59 @@ def compare(base: dict, ws: dict, detect_removed: bool = False) -> list[dict]:
         return (layer_order(m.get("layer", "other")), n)
 
     items = []
+    claimed_base = set()  # base names já associados a um item do ws
+
     for name in sorted(names, key=sort_key):
         b, w = base.get(name), ws.get(name)
-        if w and not b:
-            status, model, diff = "NOVO", w, []
+        match_info = None
+        alias_target = resolve_alias(name, aliases) if w else None
+
+        # 1) Alias manual: ZIP name -> base name
+        if w and not b and alias_target and alias_target in base:
+            b = base[alias_target]
+            claimed_base.add(alias_target)
+            if b["hash"] == w["hash"]:
+                status, diff = "IGUAL", [f"Alias: {name} = {alias_target} (mesmo conteúdo)"]
+            else:
+                status, diff = "ALTERADO", (
+                    [f"Alias: {name} no ZIP = {alias_target} no projeto"]
+                    + semantic_diff(b, w)
+                )
+            model = w
+            match_info = {
+                "name": alias_target,
+                "score": 1.0,
+                "reasons": ["alias manual no config.json"],
+                "path": b.get("path", ""),
+            }
+        elif w and not b:
+            # 2) Fuzzy: possível mesmo objeto com outro nome
+            hit = find_best_match(w, base, claimed_base, min_score=match_threshold)
+            if hit:
+                claimed_base.add(hit["name"])
+                bmatch = base[hit["name"]]
+                status = "RENOMEADO"
+                diff = semantic_diff(bmatch, w)
+                diff.insert(
+                    0,
+                    f"ZIP chama '{name}', projeto tem '{hit['name']}' "
+                    f"(confiança {int(hit['score'] * 100)}%)",
+                )
+                for r in hit["reasons"]:
+                    diff.append(f"· {r}")
+                model = w
+                match_info = {**hit, "path": bmatch.get("path", "")}
+                b = bmatch  # para target path
+            else:
+                status, model, diff = "NOVO", w, []
         elif b and not w:
             if not detect_removed:
                 continue
+            if name in claimed_base:
+                continue  # já coberto como renomeação
             status, model, diff = "REMOVIDO", b, []
         elif b and w:
+            claimed_base.add(name)
             if b["hash"] == w["hash"]:
                 status, diff = "IGUAL", []
             else:
@@ -292,12 +568,14 @@ def compare(base: dict, ws: dict, detect_removed: bool = False) -> list[dict]:
 
         if status == "NOVO":
             target = w["path"]
+        elif match_info and match_info.get("path"):
+            target = match_info["path"]
         elif b:
             target = b["path"]
         else:
             target = model["path"]
 
-        items.append({
+        item = {
             "name": name,
             "status": status,
             "label": ACTION_LABEL[status],
@@ -311,7 +589,12 @@ def compare(base: dict, ws: dict, detect_removed: bool = False) -> list[dict]:
             "sources": model.get("sources", []),
             "hash": model.get("hash", ""),
             "done": status == "IGUAL",
-        })
+            "match": match_info,
+        }
+        if match_info:
+            item["match_name"] = match_info["name"]
+            item["match_score"] = match_info["score"]
+        items.append(item)
     return items
 
 
@@ -385,7 +668,7 @@ def downstream(graph: dict, name: str) -> list[str]:
 
 
 def topo_order(checklist: list[dict], graph: dict) -> list[str]:
-    pending = [c["name"] for c in checklist if c["status"] in {"NOVO", "ALTERADO"}]
+    pending = [c["name"] for c in checklist if c["status"] in {"NOVO", "ALTERADO", "RENOMEADO"}]
     pending_set = set(pending)
     indeg = {n: 0 for n in pending}
     for n in pending:
@@ -546,7 +829,7 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
                     "action": "Após validar com 1% dos dados, promova para staging.",
                 })
 
-    # similaridade simples (mesmo prefixo + overlap de refs)
+    # similaridade simples (mesmo prefixo + overlap de refs) — só para NOVO sem match
     novos = [c for c in checklist if c["status"] == "NOVO"]
     base_names = [c["name"] for c in checklist if c["status"] in {"IGUAL", "ALTERADO", "REMOVIDO"}]
     for n in novos:
@@ -569,6 +852,42 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
                     })
                     break
 
+    # Renomeações detectadas — alerta forte para não duplicar
+    for item in checklist:
+        if item["status"] != "RENOMEADO":
+            continue
+        match = item.get("match_name") or (item.get("match") or {}).get("name", "?")
+        score = int((item.get("match_score") or 0) * 100)
+        warnings.append({
+            "severity": "warning",
+            "label": "Atenção",
+            "model": item["name"],
+            "message": (
+                f"O ZIP chama '{item['name']}', mas no projeto parece ser '{match}' "
+                f"(confiança {score}%). São provavelmente o mesmo objeto com nomes diferentes."
+            ),
+            "action": (
+                f"NÃO crie '{item['name']}'. Atualize '{match}' no path do projeto "
+                f"ou cadastre um alias em config.json: \"{item['name']}\": \"{match}\"."
+            ),
+        })
+
+    # Colisão de nomes (dois arquivos com mesmo basename)
+    for name, m in models.items():
+        if m.get("name_collision") or m.get("collisions"):
+            extra = ", ".join(m.get("collisions", [])[:5])
+            warnings.append({
+                "severity": "warning",
+                "label": "Atenção",
+                "model": name,
+                "message": (
+                    f"Existem vários arquivos com o nome '{name}'. "
+                    f"O Guardian usou um deles; confira se não há ambiguidade."
+                    + (f" Outros: {extra}" if extra else "")
+                ),
+                "action": "Renomeie arquivos duplicados ou unifique em um único modelo.",
+            })
+
     # ordenar por severidade
     rank = {"critical": 0, "warning": 1, "info": 2, "safe": 3}
     warnings.sort(key=lambda w: (rank.get(w["severity"], 9), w.get("model", "")))
@@ -577,7 +896,13 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
 
 def enrich_checklist(checklist: list[dict], graph: dict) -> list[dict]:
     for item in checklist:
-        deps = downstream(graph, item["name"])
+        deps = list(downstream(graph, item["name"]))
+        # se for renomeação, impacto também no nome do projeto
+        match_name = item.get("match_name")
+        if match_name:
+            for d in downstream(graph, match_name):
+                if d not in deps:
+                    deps.append(d)
         item["impact"] = deps
         item["impact_text"] = (
             f"Afeta depois: {', '.join(deps[:10])}" if deps else "Ninguém depende deste arquivo"
@@ -632,27 +957,43 @@ def build_flow_chains(checklist: list[dict], graph: dict) -> list[str]:
             parts = []
             for n in chain:
                 st = status_map.get(n, "IGUAL")
-                mark = {"NOVO": "criar", "ALTERADO": "atualizar", "IGUAL": "ok", "REMOVIDO": "remover"}.get(st, st)
+                mark = {
+                    "NOVO": "criar",
+                    "ALTERADO": "atualizar",
+                    "IGUAL": "ok",
+                    "REMOVIDO": "remover",
+                    "RENOMEADO": "renomear?",
+                }.get(st, st)
                 parts.append(f"{n} ({mark})")
             chains.append(" → ".join(parts))
     return chains[:20]
 
 
 def run(config: dict) -> dict:
-    base_path = config["base_project_path"]
-    ws_path = config["workspace_path"]
-    snapshots_path = config.get("snapshots_path", "")
-    card_id = config.get("card_id", "CARD-XXX")
+    base_path = config.get("base_project_path") or ""
+    ws_path = config.get("workspace_path") or ""
+    snapshots_path = config.get("snapshots_path") or ""
+    card_id = sanitize_card_id(config.get("card_id", "CARD-XXX"))
+    config = dict(config)
+    config["card_id"] = card_id
 
-    base = load_project(base_path)
-    ws = load_project(ws_path)
+    base = load_project(base_path) if base_path and os.path.isdir(base_path) else {}
+    ws = load_project(ws_path) if ws_path and os.path.isdir(ws_path) else {}
 
     # grafo unificado: base + workspace (workspace sobrescreve)
     merged = dict(base)
     merged.update(ws)
 
     detect_removed = bool(config.get("detect_removed", False))
-    checklist = compare(base, ws, detect_removed=detect_removed)
+    aliases = config.get("aliases") or {}
+    match_threshold = float(config.get("match_threshold", 0.62))
+    checklist = compare(
+        base,
+        ws,
+        detect_removed=detect_removed,
+        aliases=aliases,
+        match_threshold=match_threshold,
+    )
     graph = build_graph(merged)
     checklist = enrich_checklist(checklist, graph)
     patterns = learn_patterns(base)
@@ -670,8 +1011,11 @@ def run(config: dict) -> dict:
         "novo": sum(1 for c in checklist if c["status"] == "NOVO"),
         "alterado": sum(1 for c in checklist if c["status"] == "ALTERADO"),
         "removido": sum(1 for c in checklist if c["status"] == "REMOVIDO"),
+        "renomeado": sum(1 for c in checklist if c["status"] == "RENOMEADO"),
         "igual": sum(1 for c in checklist if c["status"] == "IGUAL"),
-        "pending": sum(1 for c in checklist if c["status"] in {"NOVO", "ALTERADO", "REMOVIDO"}),
+        "pending": sum(
+            1 for c in checklist if c["status"] in {"NOVO", "ALTERADO", "REMOVIDO", "RENOMEADO"}
+        ),
         "critical": sum(1 for w in warnings if w["severity"] == "critical"),
         "warning": sum(1 for w in warnings if w["severity"] == "warning"),
         "base_models": len(base),

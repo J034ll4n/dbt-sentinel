@@ -27,9 +27,13 @@ No `config.json`:
 
 ## Em 30 segundos
 
-1. Configure `base_project_path` + `base_include` + `card_id`
-2. Extraia o ZIP em `workspace/`
+1. Configure `base_project_path` + `card_id` (e `base_include` se quiser filtrar)
+2. Extraia o ZIP em `workspace/` (ou aponte `workspace_path` para a pasta do card)
 3. `py -3 main.py`
-4. Confira no terminal: “Analisando SOMENTE: …”
-5. Abra `output/index.html` e siga o Assistente
+4. Abra `output/index.html`
+5. **Verde = criar** (só o novo). **Vermelho = não mexer** (já existe na base)
 6. SaaS + BQ → `S` no terminal → limpe `workspace/`
+
+### Regra de ouro
+
+`add_only: true` (padrão): **não altere** arquivos que já existem na base — só adicione o que veio de novo no card.

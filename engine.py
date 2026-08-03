@@ -196,6 +196,7 @@ LAYER_MAP = (
     ("sample", "sample"),
     ("intermediate", "intermediate"),
     ("int", "intermediate"),
+    ("marts", "mart"),
     ("mart", "mart"),
     ("aggregate", "aggregate"),
     ("agg", "aggregate"),
@@ -223,6 +224,271 @@ ACTION_HINT = {
     "IGUAL": "Nada a fazer — já está igual ao projeto.",
 }
 
+# Política: criar o novo; se já existe, ACRESCEENTAR só itens novos do card;
+# nunca reescrever o código principal.
+POLICY_LABEL = {
+    "create": "Criar",
+    "append": "Acrescentar",
+    "skip": "Não alterar",
+    "review": "Revisar",
+    "exists": "Já na base",
+    "observe": "Não alterar",
+}
+
+POLICY_HINT = {
+    "create": (
+        "Arquivo NOVO do card. Crie na base com os itens listados."
+    ),
+    "append": (
+        "Arquivo JÁ EXISTE. Acrescente SOMENTE os itens novos do card "
+        "(não copie o arquivo inteiro; não reescreva o código antigo, mesmo com erros)."
+    ),
+    "skip": (
+        "Arquivo já existe e o card não trouxe itens novos seguros para acrescer. "
+        "NÃO altere o código principal."
+    ),
+    "review": (
+        "Revisar com cuidado: possível nome diferente ou remoção. "
+        "NÃO crie duplicado e NÃO reescreva o principal."
+    ),
+    "exists": "Já está igual na base — nada a fazer.",
+    "observe": "NÃO altere o arquivo principal.",
+}
+
+# Compat: labels antigos por status (quando add_only aplica policy_action)
+ADD_ONLY_LABEL = {
+    "NOVO": "Criar",
+    "ALTERADO": "Não alterar",
+    "REMOVIDO": "Não remover",
+    "RENOMEADO": "Revisar",
+    "IGUAL": "Já na base",
+}
+
+ADD_ONLY_HINT = {
+    "NOVO": POLICY_HINT["create"],
+    "ALTERADO": POLICY_HINT["skip"],
+    "REMOVIDO": "NÃO remova da base.",
+    "RENOMEADO": POLICY_HINT["review"],
+    "IGUAL": POLICY_HINT["exists"],
+}
+
+# Taxonomia de colunas (prefixo → tipo DBT esperado)
+COLUMN_TAXONOMY = {
+    "aa": "integer",
+    "ar": "array",
+    "bn": "bignumeric",
+    "by": "bytes",
+    "cd": "string",
+    "dd": "integer",
+    "dm": "datetime",
+    "ds": "string",
+    "dt": "date",
+    "fl": "boolean",
+    "ge": "geography",
+    "hh": "numeric",
+    "hr": "time",
+    "id": "integer",
+    "im": "string",
+    "in": "interval",
+    "js": "json",
+    "li": "record",
+    "mm": "integer",
+    "nm": "string",
+    "nu": "integer",
+    "pc": "numeric",
+    "qt": "integer",
+    "sg": "string",
+    "sk": "integer",
+    "sq": "integer",
+    "st": "string",
+    "te": "string",
+    "to": "string",
+    "ts": "timestamp",
+    "tx": "numeric",
+    "vr": "numeric",
+}
+
+# Natureza "código" / destino → representação numérica no DBT (integer)
+CODE_LIKE_PREFIXES = {"cd", "id", "nu", "sk", "sq"}
+
+TABLE_KIND_LABEL = {
+    "F": "fato",
+    "DIB": "dimensão",
+    "AGGR": "agregada",
+}
+
+NAME_MAX_LEN = 35
+RE_NAME_OK = re.compile(r"^[a-z][a-z0-9_]*$")
+RE_COL_PREFIX = re.compile(r"^([a-z]{2})(?:_|$)")
+
+
+def detect_table_kind(name: str, layer: str = "") -> str | None:
+    """Detecta F / DIB / AGGR pelo nome ou camada."""
+    n = (name or "").lower()
+    lay = (layer or "").lower()
+    if n.startswith("aggr_") or "_aggr_" in n:
+        return "AGGR"
+    if n.startswith("agg_") or lay == "aggregate":
+        return "AGGR"
+    if n.startswith("dib_") or "_dib_" in n:
+        return "DIB"
+    if n.startswith("f_") or re.search(r"(^|_)f_", n):
+        return "F"
+    if lay == "mart" and ("dim" in n or n.startswith("d_")):
+        return "DIB"
+    return None
+
+
+def column_prefix(col: str) -> str | None:
+    """Extrai prefixo de 2 letras da taxonomia (ex.: cd_cliente → cd)."""
+    c = (col or "").strip().lower()
+    if not c:
+        return None
+    m = RE_COL_PREFIX.match(c)
+    if not m:
+        return None
+    pref = m.group(1)
+    return pref if pref in COLUMN_TAXONOMY else None
+
+
+def check_model_name_taxonomy(name: str) -> list[str]:
+    """Regras de nome: minúsculas, underscore, máx. 35 caracteres."""
+    issues = []
+    if not name:
+        return ["nome vazio"]
+    if len(name) > NAME_MAX_LEN:
+        issues.append(f"nome tem {len(name)} caracteres (máximo {NAME_MAX_LEN})")
+    if name != name.lower():
+        issues.append("nome deve ser todo em minúsculas")
+    if "-" in name or " " in name:
+        issues.append("use underscore (_) — sem hífen nem espaço")
+    if not RE_NAME_OK.match(name.lower()):
+        issues.append("use só a-z, 0-9 e underscore; comece com letra")
+    return issues
+
+
+def apply_add_only_labels(checklist: list[dict]) -> None:
+    for item in checklist:
+        action = item.get("policy_action")
+        if action in POLICY_LABEL:
+            item["label"] = POLICY_LABEL[action]
+            item["hint"] = POLICY_HINT.get(action, "")
+        else:
+            st = item.get("status")
+            if st in ADD_ONLY_LABEL:
+                item["label"] = ADD_ONLY_LABEL[st]
+                item["hint"] = ADD_ONLY_HINT[st]
+        item["add_only"] = True
+
+
+def validate_taxonomy(item: dict, models: dict) -> list[dict]:
+    """Alertas de taxonomia (nome, tipo F/DIB/AGGR, prefixos de coluna)."""
+    warnings = []
+    name = item["name"]
+    if item.get("type") not in {"model", "seed", None}:
+        # yaml/source: só checa nome se for NOVO
+        pass
+
+    for issue in check_model_name_taxonomy(name):
+        warnings.append({
+            "severity": "warning",
+            "label": "Taxonomia",
+            "model": name,
+            "message": f"Nome fora da taxonomia: {issue}.",
+            "action": (
+                f"Renomeie para minúsculas, separado por _, com no máximo {NAME_MAX_LEN} caracteres."
+            ),
+        })
+
+    kind = detect_table_kind(name, item.get("layer", ""))
+    if kind == "DIB":
+        warnings.append({
+            "severity": "info",
+            "label": "Dimensão (DIB)",
+            "model": name,
+            "message": (
+                "Tabela dimensão deve trazer informação complementar ao fato/evento, "
+                "com regras de negócio e colunas adicionais documentadas."
+            ),
+            "action": "Confirme regras de negócio e colunas complementares antes de criar.",
+        })
+    elif kind == "AGGR":
+        refs = item.get("refs") or []
+        ok_origin = False
+        for ref in refs:
+            rk = detect_table_kind(ref, (models.get(ref) or {}).get("layer", ""))
+            if rk in {"F", "DIB"}:
+                ok_origin = True
+                break
+        if refs and not ok_origin:
+            warnings.append({
+                "severity": "warning",
+                "label": "Agregada (AGGR)",
+                "model": name,
+                "message": (
+                    "Tabela agregada deve ter origem em fato (F) ou dimensão (DIB), "
+                    "pois só elas têm a visão analítica para gerar a agregação."
+                ),
+                "action": "Ajuste os ref() para apontar a uma fato ou dimensão.",
+            })
+        warnings.append({
+            "severity": "info",
+            "label": "Agregada (AGGR)",
+            "model": name,
+            "message": (
+                "Explique de forma clara o conteúdo da agregada e a frequência de atualização."
+            ),
+            "action": "Documente conteúdo + frequência (diária, horária, etc.) no modelo/YAML.",
+        })
+    elif kind == "F":
+        warnings.append({
+            "severity": "info",
+            "label": "Fato (F)",
+            "model": name,
+            "message": "Tabela fato (F): registre o evento/medida com chaves e métricas alinhadas à taxonomia.",
+            "action": "Confira prefixos de coluna (id_, qt_, vr_, …) e tipos no DBT.",
+        })
+
+    # Colunas (aliases do SELECT) × taxonomia
+    cols = item.get("columns") or (models.get(name) or {}).get("columns") or []
+    for col in cols:
+        pref = column_prefix(col)
+        if not pref:
+            # só alerta se parecer prefixo de 2 letras + underscore
+            if re.match(r"^[a-z]{2}_", (col or "").lower()):
+                raw = (col or "").lower()[:2]
+                warnings.append({
+                    "severity": "warning",
+                    "label": "Taxonomia",
+                    "model": name,
+                    "message": (
+                        f"Coluna '{col}' usa prefixo '{raw}_', que não está na taxonomia oficial."
+                    ),
+                    "action": (
+                        "Use um prefixo válido (aa, cd, id, nm, qt, ts, …) conforme a natureza do campo."
+                    ),
+                })
+            continue
+        expected = COLUMN_TAXONOMY[pref]
+        # Código / destino → reforço numérico
+        if pref in CODE_LIKE_PREFIXES and expected == "string" and pref == "cd":
+            warnings.append({
+                "severity": "warning",
+                "label": "Taxonomia",
+                "model": name,
+                "message": (
+                    f"Coluna '{col}' (cd = código): se origem/destino for natureza código, "
+                    f"o tipo no DBT deve ser numérico (integer). "
+                    f"Se o negócio esperar texto, use string; se número, use integer."
+                ),
+                "action": (
+                    "Parametrize no DBT: número → integer; varchar/texto → string. "
+                    "Alinhe com a natureza do campo."
+                ),
+            })
+        # prefixo válido: sem spam de info por coluna
+    return warnings
+
 
 def _strip_comments(text: str) -> str:
     text = RE_COMMENT_BLOCK.sub(" ", text)
@@ -243,14 +509,15 @@ def detect_layer(rel_path: str) -> str:
 
 
 def layer_order(layer: str) -> int:
+    # source → sample → stg → int → dim/fato (mart) → aggr
     order = {
         "source": 1,
         "seed": 2,
         "sample": 3,
         "staging": 4,
         "intermediate": 5,
-        "aggregate": 6,
-        "mart": 7,
+        "mart": 6,
+        "aggregate": 7,
         "macro": 8,
         "other": 9,
     }
@@ -719,10 +986,12 @@ def compare(
             "diff": diff,
             "refs": model.get("refs", []),
             "sources": model.get("sources", []),
+            "columns": model.get("columns", []),
             "hash": model.get("hash", ""),
             "content_hash": model.get("content_hash", ""),
             "done": status == "IGUAL",
             "match": match_info,
+            "table_kind": detect_table_kind(name, model.get("layer", "")),
         }
         if match_info:
             item["match_name"] = match_info["name"]
@@ -767,10 +1036,12 @@ def compare(
             "diff": diff,
             "refs": w.get("refs", []),
             "sources": w.get("sources", []),
+            "columns": w.get("columns", []),
             "hash": w.get("hash", ""),
             "content_hash": w.get("content_hash", ""),
             "done": False,
             "match": match_info,
+            "table_kind": detect_table_kind(name, w.get("layer", "")),
         }
         if match_info:
             item["match_name"] = match_info["name"]
@@ -795,10 +1066,12 @@ def compare(
                 "diff": [],
                 "refs": b.get("refs", []),
                 "sources": b.get("sources", []),
+                "columns": b.get("columns", []),
                 "hash": b.get("hash", ""),
                 "content_hash": b.get("content_hash", ""),
                 "done": False,
                 "match": None,
+                "table_kind": detect_table_kind(name, b.get("layer", "")),
             })
 
     return items
@@ -874,27 +1147,225 @@ def downstream(graph: dict, name: str) -> list[str]:
 
 
 def topo_order(checklist: list[dict], graph: dict) -> list[str]:
-    pending = [c["name"] for c in checklist if c["status"] in {"NOVO", "ALTERADO", "RENOMEADO"}]
+    """Ordem de execução: respeita refs e prioriza source→sample→stg→int→dim/fato→aggr."""
+    by_name = {c["name"]: c for c in checklist}
+    pending = [
+        c["name"]
+        for c in checklist
+        if c.get("policy_action") in {"create", "append"}
+        or c["status"] in {"NOVO", "ALTERADO", "RENOMEADO"}
+    ]
+    # dedupe preservando
+    seen = set()
+    pending_u = []
+    for n in pending:
+        if n not in seen:
+            seen.add(n)
+            pending_u.append(n)
+    pending = pending_u
     pending_set = set(pending)
+
+    def sort_key(name: str) -> tuple:
+        c = by_name.get(name) or {}
+        layer = c.get("layer") or "other"
+        kind = c.get("table_kind") or detect_table_kind(name, layer)
+        # AGGR depois de F/DIB na mesma faixa
+        kind_boost = {"AGGR": 2, "F": 1, "DIB": 1}.get(kind or "", 0)
+        return (layer_order(layer), kind_boost, name)
+
     indeg = {n: 0 for n in pending}
     for n in pending:
         for r in graph.get(n, {}).get("refs", []):
             if r in pending_set:
                 indeg[n] = indeg.get(n, 0) + 1
-    q = deque(sorted([n for n, d in indeg.items() if d == 0]))
+            # source.* não está em pending — ok (indeg não sobe)
+
+    ready = sorted([n for n, d in indeg.items() if d == 0], key=sort_key)
     order = []
-    while q:
-        n = q.popleft()
+    while ready:
+        n = ready.pop(0)
         order.append(n)
         for dep in graph.get(n, {}).get("dependents", []):
             if dep in indeg:
                 indeg[dep] -= 1
                 if indeg[dep] == 0:
-                    q.append(dep)
-    for n in pending:
+                    ready.append(dep)
+                    ready.sort(key=sort_key)
+    for n in sorted(pending, key=sort_key):
         if n not in order:
             order.append(n)
     return order
+
+
+def verify_card(config: dict, session: dict) -> dict:
+    """Re-lê a base e confere o que o card pediu vs o que está lá agora."""
+    base_path = config.get("base_project_path") or ""
+    include = config.get("base_include") or []
+    if not isinstance(include, list):
+        include = []
+    base_now = (
+        load_project(base_path, include=include)
+        if base_path and os.path.isdir(base_path)
+        else {}
+    )
+
+    created_ok = []
+    created_missing = []
+    append_ok = []
+    append_partial = []
+    append_missing = []
+    diverged = []
+    details = []
+
+    for item in session.get("checklist") or []:
+        action = item.get("policy_action")
+        name = item["name"]
+        target = item.get("match_name") or name
+
+        if action == "create":
+            if name in base_now:
+                created_ok.append(name)
+                details.append({
+                    "name": name,
+                    "action": "create",
+                    "result": "ok",
+                    "message": f"Arquivo '{name}' encontrado na base.",
+                })
+            else:
+                created_missing.append(name)
+                details.append({
+                    "name": name,
+                    "action": "create",
+                    "result": "missing",
+                    "message": f"Ainda não está na base — falta criar '{name}'.",
+                })
+
+        elif action == "append":
+            expected = [
+                a["name"]
+                for a in (item.get("add_items") or [])
+                if a.get("kind") == "coluna"
+            ]
+            # também refs novas como informativo
+            expected_refs = [
+                a["name"]
+                for a in (item.get("add_items") or [])
+                if a.get("kind") == "referência"
+            ]
+            b = base_now.get(target)
+            if not b:
+                append_missing.append(target)
+                details.append({
+                    "name": target,
+                    "action": "append",
+                    "result": "missing_file",
+                    "message": f"Arquivo '{target}' não encontrado na base para conferir acrescento.",
+                    "expected": expected,
+                })
+                continue
+            cols_now = set(c.lower() for c in (b.get("columns") or []))
+            found = [c for c in expected if c.lower() in cols_now]
+            missing = [c for c in expected if c.lower() not in cols_now]
+            # corpo divergiu do workspace original?
+            ws_hash = item.get("content_hash") or ""
+            # não temos ws reload aqui — usar ignored_changes como sinal
+            if missing and found:
+                append_partial.append(target)
+                details.append({
+                    "name": target,
+                    "action": "append",
+                    "result": "partial",
+                    "message": (
+                        f"Acrescentado parcial em '{target}': ok={found}, falta={missing}."
+                    ),
+                    "found": found,
+                    "missing": missing,
+                })
+            elif missing and not found:
+                append_missing.append(target)
+                details.append({
+                    "name": target,
+                    "action": "append",
+                    "result": "missing",
+                    "message": f"Nenhum item novo detectado em '{target}'. Falta: {missing}.",
+                    "missing": missing,
+                })
+            else:
+                append_ok.append(target)
+                details.append({
+                    "name": target,
+                    "action": "append",
+                    "result": "ok",
+                    "message": (
+                        f"Itens novos presentes em '{target}': {found or 'ok'}."
+                        + (f" Refs pedidas: {expected_refs}" if expected_refs else "")
+                    ),
+                    "found": found,
+                })
+            # se o card tinha ignored body change e o arquivo mudou de hash vs snapshot esperado
+            if item.get("ignored_changes"):
+                # informação: mudanças manuais podem existir
+                diverged.append({
+                    "name": target,
+                    "message": (
+                        "Havia diferença de SQL no ZIP (ignorada). "
+                        "Confira se ajustes manuais não quebraram o modelo."
+                    ),
+                })
+
+    planned = sum(
+        1
+        for c in session.get("checklist") or []
+        if c.get("policy_action") in {"create", "append"}
+    )
+    done = len(created_ok) + len(append_ok)
+    report = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "card_id": session.get("card_id"),
+        "planned": planned,
+        "done_ok": done,
+        "created_ok": created_ok,
+        "created_missing": created_missing,
+        "append_ok": append_ok,
+        "append_partial": append_partial,
+        "append_missing": append_missing,
+        "diverged": diverged,
+        "details": details,
+        "complete": (
+            not created_missing
+            and not append_missing
+            and not append_partial
+        ),
+        "summary_text": "",
+    }
+    lines = [
+        f"Planejado: {planned} ação(ões) · OK: {done}",
+        f"Criados OK: {', '.join(created_ok) or '—'}",
+        f"Criados faltando: {', '.join(created_missing) or '—'}",
+        f"Acrescentados OK: {', '.join(append_ok) or '—'}",
+        f"Acrescentados parciais: {', '.join(append_partial) or '—'}",
+        f"Acrescentados faltando: {', '.join(append_missing) or '—'}",
+    ]
+    if diverged:
+        lines.append(
+            "Atenção manual: "
+            + "; ".join(d["name"] + " — " + d["message"] for d in diverged[:5])
+        )
+    report["summary_text"] = "\n".join(lines)
+    return report
+
+
+def collect_declared_sources(models: dict) -> set[str]:
+    """Origens declaradas em YAML (source.schema.table)."""
+    declared = set()
+    for m in models.values():
+        for schema, table in m.get("sources") or []:
+            # só conta como declarado se veio de arquivo yaml/source
+            if m.get("type") in {"source", "yaml"} or (m.get("path") or "").lower().endswith(
+                (".yml", ".yaml")
+            ):
+                declared.add(f"source.{schema}.{table}")
+    return declared
 
 
 def learn_patterns(base: dict) -> dict:
@@ -914,9 +1385,19 @@ def learn_patterns(base: dict) -> dict:
     }
 
 
-def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -> list[dict]:
+def validate(
+    checklist: list[dict],
+    graph: dict,
+    models: dict,
+    patterns: dict,
+    *,
+    add_only: bool = True,
+    enforce_taxonomy: bool = True,
+    declared_sources: set | None = None,
+) -> list[dict]:
     warnings = []
     known = set(models) | set(graph)
+    declared_sources = declared_sources or set()
     # sources virtuais
     for name, m in models.items():
         for schema, table in m.get("sources", []):
@@ -935,43 +1416,138 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
 
     for item in checklist:
         name = item["name"]
-        if item["status"] == "IGUAL":
+        status = item["status"]
+
+        # Política add_only: append = acrescer só o novo; skip/review = não reescrever
+        action = item.get("policy_action") or ""
+        if add_only and status == "ALTERADO" and action == "append":
+            n_add = int(item.get("add_count") or 0)
+            sample = ", ".join(a["name"] for a in (item.get("add_items") or [])[:6])
+            warnings.append({
+                "severity": "warning",
+                "label": "Acrescentar",
+                "model": name,
+                "policy": True,
+                "message": (
+                    f"'{name}' já existe na base. O card trouxe {n_add} item(ns) NOVO(S) "
+                    f"({sample}). Acrescente SOMENTE isso no arquivo — "
+                    f"não substitua o código antigo (mesmo com erros no ZIP)."
+                ),
+                "action": (
+                    f"Abra '{name}' na base e adicione apenas os itens listados no checklist. "
+                    f"Ignore mudanças de SQL que não sejam acrescento."
+                ),
+            })
+        elif add_only and status == "ALTERADO" and action == "skip":
+            warnings.append({
+                "severity": "critical",
+                "label": "Não alterar",
+                "model": name,
+                "policy": True,
+                "message": (
+                    f"'{name}' já existe e o card não trouxe itens novos para acrescer "
+                    f"(só mudou corpo/SQL). NÃO altere o arquivo principal."
+                ),
+                "action": "Ignore as diferenças do ZIP neste arquivo.",
+            })
+        if add_only and status == "RENOMEADO" and action == "append":
+            match = item.get("match_name") or "?"
+            n_add = int(item.get("add_count") or 0)
+            warnings.append({
+                "severity": "warning",
+                "label": "Acrescentar",
+                "model": name,
+                "policy": True,
+                "message": (
+                    f"ZIP='{name}' corresponde a '{match}' na base. "
+                    f"Acrescente só os {n_add} item(ns) novos em '{match}'. "
+                    f"Não crie '{name}'."
+                ),
+                "action": f"Edite '{match}' apenas para acrescentar os itens novos.",
+            })
+        elif add_only and status == "RENOMEADO":
+            match = item.get("match_name") or "?"
+            warnings.append({
+                "severity": "critical",
+                "label": "Revisar",
+                "model": name,
+                "policy": True,
+                "message": (
+                    f"O ZIP chama '{name}', mas na base já existe '{match}'. "
+                    f"NÃO crie duplicado e NÃO reescreva o arquivo antigo."
+                ),
+                "action": f"Revise; use '{match}' se for o mesmo objeto.",
+            })
+        if add_only and status == "REMOVIDO":
+            warnings.append({
+                "severity": "critical",
+                "label": "Revisar",
+                "model": name,
+                "policy": True,
+                "message": f"NÃO remova '{name}' da base sem pedido explícito.",
+                "action": "Mantenha o arquivo na base.",
+            })
+
+        if status == "IGUAL":
             continue
-        # refs inexistentes
+
+        # refs inexistentes — só bloqueia de verdade para o que vamos CRIAR
         for ref in item.get("refs", []):
             if ref not in known and not ref.startswith("source."):
+                sev = "critical" if status == "NOVO" else "warning"
                 warnings.append({
-                    "severity": "critical",
-                    "label": "Bloqueio",
+                    "severity": sev,
+                    "label": "Bloqueio" if sev == "critical" else "Atenção",
                     "model": name,
                     "message": (
                         f"O arquivo {name} referencia {ref}, mas ele não existe no projeto. "
                         f"Crie {ref} primeiro."
+                        if status == "NOVO"
+                        else (
+                            f"Diferença no ZIP: {name} referencia {ref}. "
+                            f"Como não alteramos o antigo, isto é só informativo."
+                        )
                     ),
-                    "action": f"Crie o arquivo {ref} ou corrija a referência.",
+                    "action": (
+                        f"Crie o arquivo {ref} ou corrija a referência."
+                        if status == "NOVO"
+                        else "Não altere o arquivo antigo."
+                    ),
                 })
         for schema, table in item.get("sources", []):
             src = f"source.{schema}.{table}"
-            # source declarado em yaml conta como conhecido se estiver no graph
-            if src not in known:
-                # aviso informativo — yaml pode estar incompleto
-                warnings.append({
-                    "severity": "warning",
-                    "label": "Atenção",
-                    "model": name,
-                    "message": (
-                        f"O arquivo {name} usa a origem {schema}.{table}. "
-                        f"Confirme se está declarada no sources.yml."
-                    ),
-                    "action": "Verifique o arquivo de sources (.yml).",
-                })
+            if item.get("policy_action") in {"create", "append"} or item["status"] == "NOVO":
+                if declared_sources and src not in declared_sources:
+                    warnings.append({
+                        "severity": "warning",
+                        "label": "Sources",
+                        "model": name,
+                        "message": (
+                            f"O arquivo {name} usa source('{schema}', '{table}'), "
+                            f"mas isso não aparece declarado em sources.yml na base/workspace."
+                        ),
+                        "action": (
+                            f"Declare {schema}.{table} no sources.yml ou confirme o nome da origem."
+                        ),
+                    })
+                elif src not in known:
+                    warnings.append({
+                        "severity": "warning",
+                        "label": "Atenção",
+                        "model": name,
+                        "message": (
+                            f"O arquivo {name} usa a origem {schema}.{table}. "
+                            f"Confirme se está declarada no sources.yml."
+                        ),
+                        "action": "Verifique o arquivo de sources (.yml).",
+                    })
 
-        # nomenclatura
+        # nomenclatura empírica da base (só para NOVO)
         prefs = patterns.get("by_layer", {}).get(item.get("layer", ""), {})
-        if prefs and "_" in name:
+        if prefs and "_" in name and status == "NOVO":
             prefix = name.split("_", 1)[0] + "_"
             top = next(iter(prefs), None)
-            if top and prefix not in prefs and item["status"] in {"NOVO", "ALTERADO"}:
+            if top and prefix not in prefs:
                 warnings.append({
                     "severity": "warning",
                     "label": "Atenção",
@@ -983,9 +1559,13 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
                     "action": f"Considere renomear para algo como {top}{name.split('_', 1)[-1]}.",
                 })
 
+        # Taxonomia corporativa — sinaliza se a IA/ZIP fugiu da regra (foco no NOVO)
+        if enforce_taxonomy and status == "NOVO":
+            warnings.extend(validate_taxonomy(item, models))
+
         # SAFE_CAST
         casts = models.get(name, {}).get("casts", []) if name in models else []
-        if any(c.upper() in {"SAFE_CAST", "TRY_CAST"} for c in casts):
+        if status == "NOVO" and any(c.upper() in {"SAFE_CAST", "TRY_CAST"} for c in casts):
             warnings.append({
                 "severity": "safe",
                 "label": "Seguro",
@@ -994,8 +1574,8 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
                 "action": "",
             })
 
-        # removido com downstream
-        if item["status"] == "REMOVIDO":
+        # removido com downstream (quando não é add_only, ou reforço)
+        if status == "REMOVIDO" and not add_only:
             deps = downstream(graph, name)
             if deps:
                 warnings.append({
@@ -1010,7 +1590,7 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
                 })
 
         # dead model (novo sem dependents e sem ser source/mart)
-        if item["status"] == "NOVO" and item.get("layer") not in {"source", "mart", "aggregate", "seed"}:
+        if status == "NOVO" and item.get("layer") not in {"source", "mart", "aggregate", "seed"}:
             deps = downstream(graph, name)
             if not deps and item.get("type") == "model":
                 warnings.append({
@@ -1022,7 +1602,7 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
                 })
 
         # sample sem stg
-        if "_sample" in name.lower() or item.get("layer") == "sample":
+        if status == "NOVO" and ("_sample" in name.lower() or item.get("layer") == "sample"):
             stg_guess = name.lower().replace("_sample", "").replace("sample_", "stg_")
             if not stg_guess.startswith("stg_"):
                 stg_guess = "stg_" + stg_guess
@@ -1035,7 +1615,7 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
                     "action": "Após validar com 1% dos dados, promova para staging.",
                 })
 
-    # similaridade simples (mesmo prefixo + overlap de refs) — só para NOVO sem match
+    # similaridade simples — só para NOVO
     novos = [c for c in checklist if c["status"] == "NOVO"]
     base_names = [c["name"] for c in checklist if c["status"] in {"IGUAL", "ALTERADO", "REMOVIDO"}]
     for n in novos:
@@ -1058,27 +1638,28 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
                     })
                     break
 
-    # Renomeações detectadas — alerta forte para não duplicar
-    for item in checklist:
-        if item["status"] != "RENOMEADO":
-            continue
-        match = item.get("match_name") or (item.get("match") or {}).get("name", "?")
-        score = int((item.get("match_score") or 0) * 100)
-        warnings.append({
-            "severity": "warning",
-            "label": "Atenção",
-            "model": item["name"],
-            "message": (
-                f"O ZIP chama '{item['name']}', mas no projeto parece ser '{match}' "
-                f"(confiança {score}%). São provavelmente o mesmo objeto com nomes diferentes."
-            ),
-            "action": (
-                f"NÃO crie '{item['name']}'. Atualize '{match}' no path do projeto "
-                f"ou cadastre um alias em config.json: \"{item['name']}\": \"{match}\"."
-            ),
-        })
+    # Renomeações — se não for add_only, aviso clássico
+    if not add_only:
+        for item in checklist:
+            if item["status"] != "RENOMEADO":
+                continue
+            match = item.get("match_name") or (item.get("match") or {}).get("name", "?")
+            score = int((item.get("match_score") or 0) * 100)
+            warnings.append({
+                "severity": "warning",
+                "label": "Atenção",
+                "model": item["name"],
+                "message": (
+                    f"O ZIP chama '{item['name']}', mas no projeto parece ser '{match}' "
+                    f"(confiança {score}%). São provavelmente o mesmo objeto com nomes diferentes."
+                ),
+                "action": (
+                    f"NÃO crie '{item['name']}'. Atualize '{match}' no path do projeto "
+                    f"ou cadastre um alias em config.json: \"{item['name']}\": \"{match}\"."
+                ),
+            })
 
-    # Colisão de nomes (dois arquivos com mesmo basename)
+    # Colisão de nomes
     for name, m in models.items():
         if m.get("name_collision") or m.get("collisions"):
             extra = ", ".join(m.get("collisions", [])[:5])
@@ -1094,10 +1675,315 @@ def validate(checklist: list[dict], graph: dict, models: dict, patterns: dict) -
                 "action": "Renomeie arquivos duplicados ou unifique em um único modelo.",
             })
 
-    # ordenar por severidade
     rank = {"critical": 0, "warning": 1, "info": 2, "safe": 3}
     warnings.sort(key=lambda w: (rank.get(w["severity"], 9), w.get("model", "")))
     return warnings
+
+
+def upstream(graph: dict, name: str) -> list[str]:
+    """Ancestors (refs transitivos), ordem da origem → atual."""
+    if name not in graph:
+        return []
+    out = []
+    seen = set()
+    q = deque(graph[name].get("refs", []))
+    while q:
+        n = q.popleft()
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+        q.extend(graph.get(n, {}).get("refs", []))
+    out.reverse()
+    return out
+
+
+def compute_add_items(ws_model: dict | None, base_model: dict | None = None) -> list[dict]:
+    """Itens que o card traz para ACRESULAR (nunca remoções/alterações)."""
+    ws_model = ws_model or {}
+    items: list[dict] = []
+
+    def push(kind: str, name: str, extra: dict | None = None):
+        row = {"kind": kind, "name": str(name)}
+        if extra:
+            row.update(extra)
+        items.append(row)
+
+    if base_model is None:
+        cols = list(ws_model.get("columns") or [])
+        refs = list(ws_model.get("refs") or [])
+        sources = list(ws_model.get("sources") or [])
+        joins = list(ws_model.get("joins") or [])
+        casts = list(ws_model.get("casts") or [])
+    else:
+        cols, _ = _set_diff(base_model.get("columns") or [], ws_model.get("columns") or [])
+        refs, _ = _set_diff(base_model.get("refs") or [], ws_model.get("refs") or [])
+        sources, _ = _set_diff(base_model.get("sources") or [], ws_model.get("sources") or [])
+        joins, _ = _set_diff(base_model.get("joins") or [], ws_model.get("joins") or [])
+        casts, _ = _set_diff(base_model.get("casts") or [], ws_model.get("casts") or [])
+
+    for c in cols:
+        pref = column_prefix(c)
+        push(
+            "coluna",
+            c,
+            {
+                "prefix": pref or "",
+                "dbt_type": COLUMN_TAXONOMY.get(pref, "") if pref else "",
+            },
+        )
+    for r in refs:
+        push("referência", r)
+    for src in sources:
+        if isinstance(src, (list, tuple)) and len(src) >= 2:
+            push("origem", f"{src[0]}.{src[1]}")
+        else:
+            push("origem", str(src))
+    for j in joins:
+        push("join", j)
+    for c in casts:
+        push("cast", c)
+    return items
+
+
+def ignored_changes(ws_model: dict | None, base_model: dict | None) -> list[str]:
+    """Mudanças do card que NÃO devem ser aplicadas no arquivo principal."""
+    if not base_model or not ws_model:
+        return []
+    notes = []
+    _, rem_cols = _set_diff(base_model.get("columns") or [], ws_model.get("columns") or [])
+    _, rem_refs = _set_diff(base_model.get("refs") or [], ws_model.get("refs") or [])
+    for c in rem_cols:
+        notes.append(f"coluna removida no ZIP (ignore): {c}")
+    for r in rem_refs:
+        notes.append(f"referência removida no ZIP (ignore): {r}")
+    if (
+        base_model.get("content_hash")
+        and ws_model.get("content_hash")
+        and base_model["content_hash"] != ws_model["content_hash"]
+    ):
+        notes.append("SQL/corpo diferente no ZIP — NÃO reescreva o arquivo principal")
+    return notes
+
+
+def enrich_additive(
+    checklist: list[dict],
+    base: dict,
+    ws: dict,
+) -> list[dict]:
+    """Anexa add_items / add_count e metadados de política por arquivo."""
+    for item in checklist:
+        name = item["name"]
+        status = item["status"]
+        w = ws.get(name)
+        if status == "RENOMEADO":
+            bname = item.get("match_name")
+            b = base.get(bname) if bname else None
+            w = w or ws.get(name)
+        elif status == "REMOVIDO":
+            b = base.get(name)
+            w = None
+        else:
+            b = base.get(name)
+
+        if status == "NOVO":
+            adds = compute_add_items(w, None)
+            item["exists_in_base"] = False
+            item["policy_action"] = "create"
+            item["bucket"] = "criar"
+            item["add_summary"] = (
+                f"Você vai criar este arquivo e adicionar {len(adds)} item(ns)."
+                if adds
+                else "Você vai criar este arquivo novo na base."
+            )
+        elif status == "IGUAL":
+            adds = []
+            item["exists_in_base"] = True
+            item["policy_action"] = "exists"
+            item["bucket"] = "pronto"
+            item["add_summary"] = "Já existe na base e está igual — nada a adicionar."
+        elif status == "ALTERADO":
+            adds = compute_add_items(w, b)
+            item["exists_in_base"] = True
+            if adds:
+                # Já existe MAS o card trouxe itens novos → ACRESCEENTAR só o novo
+                item["policy_action"] = "append"
+                item["bucket"] = "acrescentar"
+                names = ", ".join(a["name"] for a in adds[:8])
+                more = f" (+{len(adds)-8})" if len(adds) > 8 else ""
+                item["add_summary"] = (
+                    f"Arquivo já existe. ACRESCENTE somente estes {len(adds)} item(ns) novos "
+                    f"do card ({names}{more}). Não reescreva o restante do arquivo."
+                )
+            else:
+                item["policy_action"] = "skip"
+                item["bucket"] = "nao_alterar"
+                item["add_summary"] = (
+                    "Arquivo já existe. O card mudou SQL/estrutura sem itens novos "
+                    "para acrescer — NÃO altere o principal."
+                )
+        elif status == "RENOMEADO":
+            adds = compute_add_items(w, b)
+            item["exists_in_base"] = True
+            match = item.get("match_name") or "?"
+            if adds:
+                item["policy_action"] = "append"
+                item["bucket"] = "acrescentar"
+                item["add_summary"] = (
+                    f"O ZIP chama '{name}', mas na base é '{match}'. "
+                    f"Acrescente só os {len(adds)} item(ns) novos em '{match}' — "
+                    f"não crie '{name}' e não reescreva o arquivo."
+                )
+            else:
+                item["policy_action"] = "review"
+                item["bucket"] = "revisar"
+                item["add_summary"] = (
+                    f"Nome diferente: ZIP='{name}' / base='{match}'. "
+                    f"Revise — não crie duplicado e não reescreva o principal."
+                )
+        else:  # REMOVIDO
+            adds = []
+            item["exists_in_base"] = True
+            item["policy_action"] = "review"
+            item["bucket"] = "revisar"
+            item["add_summary"] = "NÃO remova da base. Só revise se a remoção foi pedida à parte."
+
+        item["add_items"] = adds
+        item["add_count"] = len(adds)
+        item["ignored_changes"] = ignored_changes(w, b) if b and w else []
+        if w and not item.get("columns"):
+            item["columns"] = list(w.get("columns") or [])
+        if b and status != "NOVO":
+            item["base_columns"] = list(b.get("columns") or [])
+        item["table_kind"] = item.get("table_kind") or detect_table_kind(
+            name, item.get("layer", "")
+        )
+    return checklist
+
+
+def build_lineage(checklist: list[dict], graph: dict, models: dict) -> dict:
+    """Estrutura para UI: nós por camada + arestas + metadados clicáveis."""
+    status_map = {c["name"]: c for c in checklist}
+    # incluir refs/sources do grafo que aparecem no checklist ou como vizinhos
+    names = set(status_map)
+    for c in checklist:
+        if c["status"] == "REMOVIDO":
+            continue
+        names.add(c["name"])
+        for r in c.get("refs") or []:
+            names.add(r)
+        for schema, table in c.get("sources") or []:
+            names.add(f"source.{schema}.{table}")
+        match = c.get("match_name")
+        if match:
+            names.add(match)
+
+    layer_of = {}
+    for n in names:
+        if n in status_map:
+            layer_of[n] = status_map[n].get("layer") or "other"
+        elif n.startswith("source."):
+            layer_of[n] = "source"
+        elif n in models:
+            layer_of[n] = models[n].get("layer") or detect_layer(models[n].get("path", ""))
+        else:
+            layer_of[n] = "other"
+
+    nodes = []
+    for n in sorted(names, key=lambda x: (layer_order(layer_of.get(x, "other")), x)):
+        item = status_map.get(n)
+        if item:
+            status = item["status"]
+            action = item.get("policy_action") or ""
+            if action == "create" or status == "NOVO":
+                visual = "new"
+            elif action == "append":
+                visual = "append"
+            elif action in {"skip", "observe"} or status == "REMOVIDO":
+                visual = "locked"
+            elif action == "review":
+                visual = "review"
+            else:
+                visual = "exist"
+            node = {
+                "id": n,
+                "label": n,
+                "status": status,
+                "visual": visual,
+                "layer": item.get("layer") or layer_of[n],
+                "table_kind": item.get("table_kind"),
+                "path": item.get("path", ""),
+                "domain": item.get("domain") or "",
+                "add_count": item.get("add_count", 0),
+                "add_items": item.get("add_items") or [],
+                "add_summary": item.get("add_summary") or "",
+                "ignored_changes": item.get("ignored_changes") or [],
+                "columns": item.get("columns") or [],
+                "base_columns": item.get("base_columns") or [],
+                "refs": item.get("refs") or [],
+                "sources": [
+                    f"{a}.{b}" for a, b in (item.get("sources") or [])
+                ],
+                "upstream": upstream(graph, n),
+                "downstream": list(downstream(graph, n)),
+                "depends_on": list(graph.get(n, {}).get("refs", [])),
+                "used_by": list(graph.get(n, {}).get("dependents", [])),
+                "policy_action": action or "observe",
+                "bucket": item.get("bucket") or "",
+                "hint": item.get("hint") or "",
+                "type": item.get("type") or "model",
+            }
+        else:
+            # nó de contexto (já na base / source virtual)
+            m = models.get(n) or {}
+            node = {
+                "id": n,
+                "label": n,
+                "status": "IGUAL" if not n.startswith("source.") else "SOURCE",
+                "visual": "exist",
+                "layer": layer_of[n],
+                "table_kind": detect_table_kind(n, layer_of[n]),
+                "path": m.get("path", ""),
+                "domain": m.get("domain") or "",
+                "add_count": 0,
+                "add_items": [],
+                "add_summary": "Já existe no projeto (contexto do fluxo).",
+                "ignored_changes": [],
+                "columns": list(m.get("columns") or []),
+                "base_columns": list(m.get("columns") or []),
+                "refs": list(m.get("refs") or []),
+                "sources": [f"{a}.{b}" for a, b in (m.get("sources") or [])],
+                "upstream": upstream(graph, n),
+                "downstream": list(downstream(graph, n)),
+                "depends_on": list(graph.get(n, {}).get("refs", [])),
+                "used_by": list(graph.get(n, {}).get("dependents", [])),
+                "policy_action": "exists",
+                "bucket": "pronto",
+                "hint": "Nó de contexto — já na base / origem.",
+                "type": m.get("type") or ("source" if n.startswith("source.") else "model"),
+            }
+        nodes.append(node)
+
+    edges = []
+    node_ids = {n["id"] for n in nodes}
+    for n in nodes:
+        for ref in graph.get(n["id"], {}).get("refs", []):
+            if ref in node_ids:
+                edges.append({"from": ref, "to": n["id"]})
+        # sources no item
+        for src in n.get("sources") or []:
+            sid = src if src.startswith("source.") else f"source.{src}" if "." in src else src
+            # sources já estão como source.schema.table nos refs do graph
+            pass
+
+    layers_order = [
+        "source", "seed", "sample", "staging", "intermediate", "mart", "aggregate", "other"
+    ]
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "layers": [L for L in layers_order if any(n["layer"] == L for n in nodes)],
+    }
 
 
 def enrich_checklist(checklist: list[dict], graph: dict) -> list[dict]:
@@ -1113,6 +1999,7 @@ def enrich_checklist(checklist: list[dict], graph: dict) -> list[dict]:
         item["impact_text"] = (
             f"Afeta depois: {', '.join(deps[:10])}" if deps else "Ninguém depende deste arquivo"
         )
+        item["upstream"] = upstream(graph, item["name"])
     return checklist
 
 
@@ -1221,8 +2108,22 @@ def run(config: dict) -> dict:
         item["domain"] = src.get("domain") or detect_domain(item.get("path", ""))
     graph = build_graph(merged)
     checklist = enrich_checklist(checklist, graph)
+    checklist = enrich_additive(checklist, base, ws)
     patterns = learn_patterns(base)
-    warnings = validate(checklist, graph, merged, patterns)
+    declared_sources = collect_declared_sources(merged)
+    add_only = bool(config.get("add_only", True))
+    enforce_taxonomy = bool(config.get("enforce_taxonomy", True))
+    if add_only:
+        apply_add_only_labels(checklist)
+    warnings = validate(
+        checklist,
+        graph,
+        merged,
+        patterns,
+        add_only=add_only,
+        enforce_taxonomy=enforce_taxonomy,
+        declared_sources=declared_sources,
+    )
     order = topo_order(checklist, graph)
 
     # aplicar ordem sugerida no checklist
@@ -1232,16 +2133,35 @@ def run(config: dict) -> dict:
 
     checklist.sort(key=lambda c: (0 if c["status"] != "IGUAL" else 1, c["layer_order"], c.get("suggested_order", 999), c["name"]))
 
+    lineage = build_lineage(checklist, graph, merged)
+
     summary = {
-        "novo": sum(1 for c in checklist if c["status"] == "NOVO"),
+        "novo": sum(1 for c in checklist if c.get("policy_action") == "create" or c["status"] == "NOVO"),
+        "acrescentar": sum(1 for c in checklist if c.get("policy_action") == "append"),
         "alterado": sum(1 for c in checklist if c["status"] == "ALTERADO"),
         "removido": sum(1 for c in checklist if c["status"] == "REMOVIDO"),
         "renomeado": sum(1 for c in checklist if c["status"] == "RENOMEADO"),
         "igual": sum(1 for c in checklist if c["status"] == "IGUAL"),
-        "pending": sum(
-            1 for c in checklist if c["status"] in {"NOVO", "ALTERADO", "REMOVIDO", "RENOMEADO"}
+        "nao_alterar": sum(1 for c in checklist if c.get("policy_action") == "skip"),
+        "revisar": sum(1 for c in checklist if c.get("policy_action") == "review"),
+        "pending": (
+            sum(1 for c in checklist if c.get("policy_action") in {"create", "append"})
+            if add_only
+            else sum(
+                1
+                for c in checklist
+                if c["status"] in {"NOVO", "ALTERADO", "REMOVIDO", "RENOMEADO"}
+            )
         ),
-        "critical": sum(1 for w in warnings if w["severity"] == "critical"),
+        "critical": sum(
+            1
+            for w in warnings
+            if w["severity"] == "critical" and not w.get("policy")
+        ),
+        "policy_blocks": sum(1 for w in warnings if w.get("policy") and w["severity"] == "critical"),
+        "policy_append": sum(
+            1 for w in warnings if w.get("policy") and w.get("label") == "Acrescentar"
+        ),
         "warning": sum(1 for w in warnings if w["severity"] == "warning"),
         "base_models": len(base),
         "workspace_models": len(ws),
@@ -1267,8 +2187,24 @@ def run(config: dict) -> dict:
         )
     elif summary["critical"] > 0:
         message = (
-            f"Você tem {summary['critical']} bloqueio(s). "
-            "Resolva-os antes de continuar — veja a aba Alertas."
+            f"Você tem {summary['critical']} bloqueio(s) nos arquivos NOVOS. "
+            "Resolva-os antes de criar — veja a aba Alertas."
+        )
+    elif add_only and summary.get("acrescentar", 0) > 0:
+        message = (
+            f"Crie {summary['novo']} arquivo(s) novos e ACRESCENTE itens em "
+            f"{summary['acrescentar']} arquivo(s) que já existem "
+            f"(só o que veio de novo no card — não reescreva o principal)."
+        )
+    elif add_only and summary.get("policy_blocks", 0) > 0 and summary["novo"] > 0:
+        message = (
+            f"Crie os {summary['novo']} arquivo(s) VERDE(S). "
+            f"Há {summary['policy_blocks']} item(ns) para não alterar/revisar."
+        )
+    elif add_only and summary.get("policy_blocks", 0) > 0 and summary["novo"] == 0:
+        message = (
+            "Nada novo para criar. Revise avisos de política — "
+            "não reescreva a base sem necessidade."
         )
 
     session = {
@@ -1280,6 +2216,7 @@ def run(config: dict) -> dict:
         "warnings": warnings,
         "order": order,
         "flow_chains": build_flow_chains(checklist, graph),
+        "lineage": lineage,
         "timeline": load_timeline(snapshots_path),
         "patterns": patterns,
         "empty_workspace": empty_ws,
@@ -1288,5 +2225,8 @@ def run(config: dict) -> dict:
         "base_include": include,
         "base_top_folders": top_folders,
         "domains_scanned": include if include else top_folders,
+        "add_only": add_only,
+        "enforce_taxonomy": enforce_taxonomy,
+        "declared_sources": sorted(declared_sources),
     }
     return session

@@ -1,13 +1,17 @@
 ﻿{
-  "base_project_path": "C:\\caminho\\para\\dbt\\corporativo",
-  "base_include": ["ebody", "AIS", "Rodos"],
-  "workspace_path": "C:\\Users\\zirn1\\novo\\workspace",
-  "output_path": "C:\\Users\\zirn1\\novo\\output",
-  "snapshots_path": "C:\\Users\\zirn1\\novo\\snapshots",
-  "card_id": "CARD-100",
+  "base_project_path": "demo_base",
+  "base_include": [
+    "ebody"
+  ],
+  "workspace_path": "workspace",
+  "output_path": "output",
+  "snapshots_path": "snapshots",
+  "card_id": "6691-DEMO",
   "detect_removed": false,
   "match_threshold": 0.62,
   "aliases": {},
   "allow_empty_base": false,
-  "require_git_integrity": false
+  "require_git_integrity": false,
+  "add_only": true,
+  "enforce_taxonomy": true
 }

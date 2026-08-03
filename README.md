@@ -31,8 +31,7 @@ Repositório: https://github.com/J034ll4n/dbt-sentinel
 ---
 
 ## 1. Para que serve
-
-No dia a dia da consultoria:
+Auxilia a migração de SaaS para DBT em ambientes restritos 
 
 1. Você recebe um **card no Jira** com um ZIP do fluxo SaaS DBT.
 2. Precisa levar isso para o **repositório corporativo** (source → sample → stg → int → aggregate).
@@ -50,7 +49,7 @@ ZIP do Jira (workspace/)  +  Projeto DBT (base)  →  output/index.html
 
 Siga nesta ordem. Não precisa saber programar.
 
-### Primeira vez (só uma vez)
+### Primeira vez 
 
 1. Instale / confirme **Python 3** na VDI (não precisa de `pip`).
 2. Baixe ou clone este projeto (ex.: `C:\Users\zirn1\novo` ou a pasta do Sentinel).

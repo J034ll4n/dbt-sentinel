@@ -50,6 +50,8 @@ def load_config() -> dict:
         cfg["allow_empty_base"] = False
     if "require_git_integrity" not in cfg:
         cfg["require_git_integrity"] = False
+    if "base_include" not in cfg or cfg["base_include"] is None:
+        cfg["base_include"] = []
 
     errors = engine.validate_config(cfg)
     if errors:
@@ -187,6 +189,21 @@ def main() -> None:
     if before is None and base and os.path.isdir(base):
         print("AVISO: integridade git indisponível na base (sem .git ou git).")
         print("  A ferramenta não grava na base, mas não há checagem automática.")
+
+    # Mostra pastas de negócio encontradas vs filtradas
+    if base and os.path.isdir(base):
+        tops = engine.list_top_folders(base)
+        inc = cfg.get("base_include") or []
+        print()
+        print(f"  Pasta base: {base}")
+        if tops:
+            print(f"  Pastas encontradas na base: {', '.join(tops)}")
+        if inc:
+            print(f"  Analisando SOMENTE: {', '.join(inc)}")
+        elif tops and len(tops) > 3:
+            print("  AVISO: muitas pastas na base e base_include está vazio.")
+            print('  Dica: no config.json use "base_include": ["ebody", "AIS", "Rodos"]')
+            print("  para analisar só os negócios que importam.")
 
     try:
         session = engine.run(cfg)

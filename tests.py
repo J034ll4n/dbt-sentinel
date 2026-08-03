@@ -337,7 +337,6 @@ def test_exclusive_rename_no_double_claim() -> None:
         open(os.path.join(base, "models", "staging", "stg_cliente.sql"), "w", encoding="utf-8").write(
             "select id, nome from {{ source('crm', 'cliente') }}\n"
         )
-        # ZIP traz o nome certo E um nome parecido — não deve renomear o parecido para o mesmo
         open(os.path.join(ws, "models", "staging", "stg_cliente.sql"), "w", encoding="utf-8").write(
             "select id, nome from {{ source('crm', 'cliente') }}\n"
         )
@@ -364,6 +363,40 @@ def test_exclusive_rename_no_double_claim() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_base_include_filters_domains() -> None:
+    root = tempfile.mkdtemp(prefix="dbt_dom_")
+    try:
+        base = os.path.join(root, "base")
+        for dom, model in (("ebody", "stg_ebody"), ("AIS", "stg_ais"), ("Rodos", "stg_rodos"), ("schemas", "stg_skip")):
+            d = os.path.join(base, dom, "models", "staging")
+            os.makedirs(d)
+            open(os.path.join(d, model + ".sql"), "w", encoding="utf-8").write(
+                "select 1 as id\n"
+            )
+        tops = engine.list_top_folders(base)
+        assert_true("ebody" in tops and "schemas" in tops, "list_tops", str(tops))
+
+        models = engine.load_project(base, include=["ebody", "AIS", "Rodos"])
+        names = set(models)
+        assert_true("stg_ebody" in names and "stg_ais" in names and "stg_rodos" in names, "include_ok", str(names))
+        assert_true("stg_skip" not in names, "schemas_skipped", str(names))
+        assert_true(models["stg_ebody"].get("domain") == "ebody", "domain_field", str(models["stg_ebody"]))
+
+        cfg_err = {
+            "workspace_path": root,
+            "output_path": os.path.join(root, "o"),
+            "snapshots_path": os.path.join(root, "s"),
+            "base_project_path": base,
+            "base_include": ["nao_existe"],
+            "aliases": {},
+            "match_threshold": 0.62,
+        }
+        errs = engine.validate_config(cfg_err)
+        assert_true(any("nao_existe" in e for e in errs), "include_missing", str(errs))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> None:
     print("=== DBT Guardian tests ===")
     test_parse_sql()
@@ -376,6 +409,7 @@ def main() -> None:
     test_content_hash_not_false_igual()
     test_yaml_models_not_sources()
     test_exclusive_rename_no_double_claim()
+    test_base_include_filters_domains()
     print()
     print(f"Passed: {passed}  Failed: {failed}")
     if failed:

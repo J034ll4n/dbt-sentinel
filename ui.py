@@ -70,6 +70,7 @@ def _cards(checklist: list) -> str:
   {match_html}
   <p><strong>Onde:</strong> <code title="{_esc(c.get('path',''))}">{_esc(c.get('path',''))}</code></p>
   <p><strong>Camada:</strong> {_esc(c.get('layer',''))}
+     {(" · <strong>Negócio:</strong> " + _esc(c['domain'])) if c.get('domain') else ""}
      · <strong>Ordem sugerida:</strong> {_esc(c.get('suggested_order', '—'))}</p>
   {diff_html}
   {impact}
@@ -370,6 +371,10 @@ footer {{
 <header class="app">
   <h1>DBT Guardian</h1>
   <div class="sub">Card <strong>{card}</strong> · {_esc(session.get('timestamp',''))}</div>
+  <div class="sub" style="margin-top:.35rem">
+    Base: <code>{_esc(session.get('base_path',''))}</code>
+    {(" · Negócios: " + _esc(", ".join(session.get("domains_scanned") or []))) if session.get("domains_scanned") else ""}
+  </div>
   <div class="progress" title="Arquivos já iguais / total"><span></span></div>
   <div class="stats">
     <div class="stat">Criar: <b>{s.get('novo', 0)}</b></div>

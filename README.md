@@ -2,7 +2,7 @@
 
 Ferramenta de **orientação visual** para migrar pacotes SaaS/Jira para o repositório DBT corporativo.
 
-Compara o que veio no ZIP com o que já existe no projeto, mostra o que **criar**, o que **atualizar**, o que é o **mesmo objeto com outro nome**, o **fluxo de dados** e os **bloqueios** — em uma página HTML simples.
+Compara o ZIP do card com o projeto base, mostra o que **criar**, **atualizar**, o que é o **mesmo objeto com outro nome**, o **fluxo** e os **bloqueios** — em HTML simples.
 
 | | |
 |---|---|
@@ -18,131 +18,194 @@ Repositório: https://github.com/J034ll4n/dbt-sentinel
 ## Índice
 
 1. [Para que serve](#1-para-que-serve)
-2. [Guia passo a passo (para leigos)](#2-guia-passo-a-passo-para-leigos)
-3. [O que aparece na tela](#3-o-que-aparece-na-tela)
-4. [Configuração (`config.json`)](#4-configuração-configjson)
-5. [Arquitetura](#5-arquitetura)
-6. [Segurança e blindagem](#6-segurança-e-blindagem)
-7. [Testes](#7-testes)
-8. [Troubleshooting](#8-troubleshooting)
-9. [O que a ferramenta NÃO faz](#9-o-que-a-ferramenta-não-faz)
-10. [Estrutura de arquivos](#10-estrutura-de-arquivos)
+2. [Qual caminho colar no config (LEIA ISTO)](#2-qual-caminho-colar-no-config-leia-isto)
+3. [Guia passo a passo (para leigos)](#3-guia-passo-a-passo-para-leigos)
+4. [O que aparece na tela](#4-o-que-aparece-na-tela)
+5. [Configuração completa](#5-configuração-completa)
+6. [Arquitetura](#6-arquitetura)
+7. [Segurança](#7-segurança)
+8. [Testes](#8-testes)
+9. [Troubleshooting](#9-troubleshooting)
+10. [O que NÃO faz](#10-o-que-não-faz)
+11. [Arquivos do projeto](#11-arquivos-do-projeto)
 
 ---
 
 ## 1. Para que serve
 
-No dia a dia da consultoria:
-
 1. Você recebe um **card no Jira** com um ZIP do fluxo SaaS DBT.
 2. Precisa levar isso para o **repositório corporativo** (source → sample → stg → int → aggregate).
-3. A IDE fica confusa; nomes mudam; dá medo de quebrar o que já existe.
+3. O Sentinel compara os dois lados e gera um assistente no navegador.
 
-O **DBT Sentinel** roda **fora** do VSCode do DBT, lê os dois lados e gera um **assistente no navegador** dizendo exatamente o que fazer.
-
-```
+```text
 ZIP do Jira (workspace/)  +  Projeto DBT (base)  →  output/index.html
 ```
 
 ---
 
-## 2. Guia passo a passo (para leigos)
+## 2. Qual caminho colar no config (LEIA ISTO)
 
-Siga nesta ordem. Não precisa saber programar.
+Na empresa o DBT costuma ter **uma pasta raiz** e **várias pastas de negócio** dentro (ex.: `AIS`, `ebody`, `Rodos`, `impress_code`, `schemas`…).
 
-### Primeira vez (só uma vez)
+Você **não precisa** analisar tudo. O Sentinel deixa você **tunelar** só os negócios do card.
 
-1. Instale / confirme **Python 3** na VDI (não precisa de `pip`).
-2. Baixe ou clone este projeto (ex.: `C:\Users\zirn1\novo` ou a pasta do Sentinel).
-3. Abra o arquivo `config.json` no Bloco de Notas.
-4. Troque `base_project_path` pelo caminho **real** da pasta do seu DBT corporativo, por exemplo:
-   ```text
-   C:\projetos\dbt-corporativo
-   ```
-5. Salve o arquivo.
-
-### Todo card (rotina diária)
-
-| # | O que fazer | Onde |
-|---|-------------|------|
-| 1 | Atualize o projeto DBT (`git pull`) | VSCode do DBT |
-| 2 | Baixe o ZIP do card no Jira | Portal Jira |
-| 3 | **Apague** o conteúdo antigo de `workspace\` (se houver) | Pasta do Sentinel |
-| 4 | Extraia o ZIP **dentro** de `workspace\` | Explorer |
-| 5 | No `config.json`, mude `card_id` (ex.: `CARD-205`) | Bloco de Notas |
-| 6 | Abra o terminal **na pasta do Sentinel** (não no DBT) | PowerShell |
-| 7 | Rode: `py -3 main.py` | Terminal |
-| 8 | O navegador abre `output\index.html` | Chrome / Edge |
-| 9 | Na aba **Assistente**, faça o Passo 1 → 2 → 3 → 4 | Navegador |
-| 10 | Copie/atualize os arquivos no projeto DBT conforme os cards | VSCode do DBT |
-| 11 | Valide no **SaaS** e no **BigQuery** | Ambientes externos |
-| 12 | Volte ao terminal e digite `S` para gravar o histórico do card | Terminal |
-| 13 | Limpe `workspace\` de novo | Explorer |
-
-> Se o comando `python` não funcionar, use sempre: **`py -3 main.py`**
-
-### Como saber se está certo?
-
-- **Vermelho (Bloqueio)** → resolva antes de continuar (ex.: referência a modelo que não existe).
-- **Roxo (Nome diferente)** → **não crie arquivo novo**; atualize o que já existe no projeto.
-- **Azul (Criar)** → copie do `workspace` para o caminho indicado.
-- **Amarelo (Atualizar)** → o arquivo já existe; aplique as mudanças listadas.
-- **Verde (Pronto)** → nada a fazer.
-
-### Ordem de implementação (importante)
+### Exemplo real da estrutura
 
 ```text
-source (.yml)  →  sample (1% dos dados)  →  staging  →  intermediate  →  aggregate/mart
+C:\projetos\dbt-corporativo\          ← ESTA é a pasta BASE (cole no config)
+├── AIS\
+│   └── models\staging\...
+├── ebody\
+│   └── models\staging\...
+│   └── models\intermediate\...
+├── Rodos\
+│   └── models\...
+├── impress_code\
+├── schemas\
+└── (outras pastas que você IGNORA)
 ```
 
-O Assistente sugere essa ordem automaticamente. Siga para não quebrar `ref()` / `source()`.
+### O que colar no `config.json`
 
-### Regra de ouro
+| Campo | O que colocar | Exemplo |
+|-------|----------------|---------|
+| `base_project_path` | Caminho da **pasta raiz** do DBT (a que contém AIS, ebody, Rodos…) | `C:\\projetos\\dbt-corporativo` |
+| `base_include` | **Só** os nomes das pastas de negócio deste card (lista) | `["ebody", "AIS", "Rodos"]` |
 
-1. Não finalize o card com **bloqueios vermelhos**.
-2. Marque cada item como feito na aba **Arquivos**.
-3. Só responda **S** no terminal depois de **SaaS OK** e **BQ OK**.
-
----
-
-## 3. O que aparece na tela
-
-Uma única página (`output/index.html`) com **4 abas**:
-
-| Aba | Para quê |
-|-----|----------|
-| **Assistente** | Wizard em 4 passos: bloqueios → criar → atualizar/renomear → validar SaaS/BQ |
-| **Arquivos** | Checklist: um card por arquivo, com caminho e “o que mudou” |
-| **Fluxo** | Cadeia visual source → sample → stg → int → final |
-| **Alertas** | Bloqueios, atenções e histórico de cards (snapshots) |
-
-### Status dos arquivos
-
-| Status | Na tela | Ação |
-|--------|---------|------|
-| `NOVO` | Criar arquivo | Copiar do workspace para o path indicado |
-| `ALTERADO` | Atualizar arquivo | Merge manual guiado pelo diff |
-| `RENOMEADO` | Nome diferente | Mesmo objeto, outro nome — **não duplicar** |
-| `REMOVIDO` | Verificar remoção | Só aparece se `detect_removed: true` |
-| `IGUAL` | Pronto | Já sincronizado (estrutura **e** lógica iguais) |
-
-### Quando a IA muda o nome do arquivo
-
-Três camadas:
-
-1. **Aliases** no `config.json` (você fixa o mapa).
-2. **Nome parecido** (`stg_client` ≈ `stg_cliente`).
-3. **Estrutura parecida** (mesmos refs/sources/colunas), só na **mesma camada**.
-
-Se casar → status **RENOMEADO**, com % de confiança e o caminho do arquivo **já existente**.
-
----
-
-## 4. Configuração (`config.json`)
+Exemplo pronto para copiar:
 
 ```json
 {
-  "base_project_path": "C:\\caminho\\para\\dbt\\corporativo",
+  "base_project_path": "C:\\projetos\\dbt-corporativo",
+  "base_include": ["ebody", "AIS", "Rodos"],
+  "workspace_path": "C:\\Users\\zirn1\\novo\\workspace",
+  "output_path": "C:\\Users\\zirn1\\novo\\output",
+  "snapshots_path": "C:\\Users\\zirn1\\novo\\snapshots",
+  "card_id": "CARD-100"
+}
+```
+
+### Como descobrir o caminho certo no Windows
+
+1. Abra o Explorer na pasta do DBT.
+2. Clique na barra de endereço → copie o caminho completo.
+3. No `config.json`, use barras duplas: `C:\\projetos\\dbt-corporativo`
+4. Em `base_include`, coloque **apenas o nome** da pasta (sem `C:\` e sem `\models`):
+   - Certo: `"ebody"`
+   - Errado: `"C:\\projetos\\dbt-corporativo\\ebody"`
+   - Errado: `"ebody\\models"`
+
+### Duas formas de usar
+
+**A) Recomendado — raiz + filtro (vários negócios no mesmo card)**
+
+```json
+"base_project_path": "C:\\projetos\\dbt-corporativo",
+"base_include": ["ebody", "AIS", "Rodos"]
+```
+
+O Sentinel analisa **somente** essas pastas. O resto da árvore é ignorado.
+
+**B) Um negócio só — apontar direto para a pasta**
+
+```json
+"base_project_path": "C:\\projetos\\dbt-corporativo\\ebody",
+"base_include": []
+```
+
+Use quando o card for 100% de um único domínio.
+
+### O que o terminal mostra
+
+Ao rodar `py -3 main.py`, você verá algo assim:
+
+```text
+  Pasta base: C:\projetos\dbt-corporativo
+  Pastas encontradas na base: AIS, ebody, Rodos, impress_code, schemas
+  Analisando SOMENTE: ebody, AIS, Rodos
+```
+
+Se `base_include` estiver vazio e houver muitas pastas, o Sentinel avisa para você filtrar.
+
+### Workspace (ZIP do Jira)
+
+- Extraia o ZIP em `workspace\`
+- Se o ZIP tiver as mesmas pastas (`ebody`, `AIS`…), o filtro `base_include` também se aplica ao workspace
+- Se o ZIP vier “achatado” (só `models\...`), o Sentinel lê o workspace inteiro
+
+---
+
+## 3. Guia passo a passo (para leigos)
+
+### Primeira vez
+
+1. Confirme Python 3 na VDI (`py -3 --version`).
+2. Abra `config.json`.
+3. Cole `base_project_path` = pasta **raiz** do DBT.
+4. Preencha `base_include` com as 2–3 pastas de negócio do seu time (ex.: `ebody`, `AIS`, `Rodos`).
+5. Salve.
+
+### Todo card
+
+| # | O que fazer | Onde |
+|---|-------------|------|
+| 1 | `git pull` no DBT | VSCode do DBT |
+| 2 | Baixar ZIP do Jira | Portal |
+| 3 | Limpar `workspace\` | Explorer |
+| 4 | Extrair ZIP **dentro** de `workspace\` | Explorer |
+| 5 | Ajustar `card_id` (e `base_include` se o card for outro negócio) | `config.json` |
+| 6 | Terminal na pasta do Sentinel | PowerShell |
+| 7 | `py -3 main.py` | Terminal |
+| 8 | Conferir no terminal quais pastas serão analisadas | Terminal |
+| 9 | Abrir `output\index.html` | Navegador |
+| 10 | Seguir Assistente (Passos 1→4) | HTML |
+| 11 | Copiar/atualizar no DBT nos paths indicados (ex.: `ebody\models\...`) | VSCode |
+| 12 | Validar SaaS + BigQuery | Ambientes |
+| 13 | Responder `S` no terminal | Snapshot |
+| 14 | Limpar `workspace\` | Explorer |
+
+> Se `python` falhar, use sempre: **`py -3 main.py`**
+
+### Regra de ouro
+
+1. Sem bloqueios vermelhos.
+2. Marque itens feitos na aba Arquivos.
+3. Só finalize (`S`) depois de SaaS OK e BQ OK.
+
+### Ordem do fluxo
+
+```text
+source (.yml) → sample (1%) → staging → intermediate → aggregate/mart
+```
+
+---
+
+## 4. O que aparece na tela
+
+| Aba | Função |
+|-----|--------|
+| **Assistente** | 4 passos: bloqueios → criar → atualizar/renomear → SaaS/BQ |
+| **Arquivos** | Checklist com path completo (inclui pasta de negócio) |
+| **Fluxo** | Cadeia source → … → final |
+| **Alertas** | Bloqueios + histórico |
+
+| Status | Significado |
+|--------|-------------|
+| Criar | Arquivo novo |
+| Atualizar | Já existe e mudou (estrutura ou lógica SQL) |
+| Nome diferente | Mesmo objeto, outro nome — **não duplicar** |
+| Pronto | Igual (estrutura **e** corpo SQL) |
+
+Cada card mostra **Negócio:** (ex.: `ebody`) quando a pasta existir no path.
+
+---
+
+## 5. Configuração completa
+
+```json
+{
+  "base_project_path": "C:\\projetos\\dbt-corporativo",
+  "base_include": ["ebody", "AIS", "Rodos"],
   "workspace_path": "C:\\Users\\zirn1\\novo\\workspace",
   "output_path": "C:\\Users\\zirn1\\novo\\output",
   "snapshots_path": "C:\\Users\\zirn1\\novo\\snapshots",
@@ -159,129 +222,70 @@ Se casar → status **RENOMEADO**, com % de confiança e o caminho do arquivo **
 
 | Campo | Significado |
 |-------|-------------|
-| `base_project_path` | Pasta do DBT corporativo (**somente leitura**) |
-| `workspace_path` | Onde você extrai o ZIP do Jira |
-| `output_path` | Onde saem `index.html` e `session.json` |
-| `snapshots_path` | Histórico por card |
-| `card_id` | Identificador do card (ex.: `CARD-205`) |
-| `detect_removed` | `false` = ZIP parcial (padrão). `true` = avisa o que sumiu |
-| `match_threshold` | Sensibilidade do detector de renomeação (0.0–1.0) |
-| `aliases` | Mapa `nome_no_ZIP` → `nome_no_projeto` |
-| `allow_empty_base` | Só em emergência — resultados **não confiáveis** |
-| `require_git_integrity` | Se `true`, exige que a base seja um repo git |
-
-**Importante:** `output_path`, `snapshots_path` e `workspace_path` **não podem** ficar dentro do projeto DBT. O Sentinel recusa e encerra.
+| `base_project_path` | Raiz do DBT corporativo |
+| `base_include` | Lista de pastas de negócio a analisar (vazio = tudo) |
+| `workspace_path` | Onde está o ZIP extraído |
+| `output_path` / `snapshots_path` | Saídas do Sentinel (**fora** do DBT) |
+| `card_id` | ID do card Jira |
+| `detect_removed` | `false` para ZIP parcial |
+| `match_threshold` | Sensibilidade de renomeação |
+| `aliases` | Mapa nome-ZIP → nome-projeto |
+| `allow_empty_base` | Emergência apenas |
+| `require_git_integrity` | Exige git na base |
 
 ---
 
-## 5. Arquitetura
-
-Código mínimo, 3 arquivos Python:
+## 6. Arquitetura
 
 ```text
-main.py     → CLI (config, git check, snapshot, abre HTML)
-engine.py   → scan → parse → compare → grafo → validação
-ui.py       → gera output/index.html (4 abas, CSS/JS inline)
+main.py     → CLI
+engine.py   → scan (com filtro de pastas) → parse → compare → lineage → validate
+ui.py       → HTML com 4 abas
 ```
-
-Fluxo interno:
-
-```text
-Discovery (scan) → Parser (SQL/YAML) → Compare (hash estrutural + corpo)
-                 → Lineage (grafo) → Validate (alertas) → HTML
-```
-
-- Modelos em memória = `dict` (sem classes pesadas).
-- Diff por **hash estrutural** (refs, sources, joins, casts, columns) **+ hash do corpo SQL** (evita “IGUAL” falso quando só o `WHERE` mudou).
-- Lineage em grafo puro Python (dependências, ciclos, impacto downstream).
 
 ---
 
-## 6. Segurança e blindagem
+## 7. Segurança
 
-| Proteção | Detalhe |
-|----------|---------|
-| Somente leitura na base | Nunca grava no DBT; checa `git status` antes/depois |
-| Escrita restrita | Só `output/` e `snapshots/` |
-| Path traversal | `card_id` sanitizado; paths validados dentro da pasta |
-| Symlinks | Ignorados no scan |
-| XSS | JSON no HTML com escape `\u003c` |
-| Arquivos grandes | Ignora > 2 MB; teto de 20k arquivos |
-| YAML correto | `sources:` separado de `models:` (coluna ≠ source) |
-| Rename exclusivo | Um modelo base não é reivindicado duas vezes |
-| Base obrigatória | Sem base válida → erro (salvo `allow_empty_base`) |
+Somente leitura na base · escrita só em output/snapshots · path traversal bloqueado · XSS escapado · YAML `sources` ≠ `models` · rename exclusivo · base inválida falha fechado · `base_include` valida se a pasta existe.
 
 ---
 
-## 7. Testes
-
-Sem dependências externas:
+## 8. Testes
 
 ```powershell
-cd C:\Users\zirn1\novo
 py -3 tests.py
 ```
 
-Cobre: parse SQL/YAML, hash, ciclos, lineage, rename/alias, XSS, path safety, diff de corpo SQL, atribuição exclusiva de nomes.
-
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Problema | Solução |
 |----------|---------|
-| `base_project_path inválido` | Coloque o caminho absoluto real no `config.json` |
-| Workspace vazio | Extraia o ZIP **dentro** de `workspace\`, não na raiz do Sentinel |
-| Nenhum modelo detectado | Confira se o ZIP tem `.sql` / `.yml` |
-| HTML em branco | Abra `output\index.html` (dados já vêm embutidos) |
-| `git status mudou` | Não deveria acontecer — reporte; a ferramenta não grava na base |
-| Muitos “Nome diferente” errados | Suba `match_threshold` (ex.: `0.75`) ou use `aliases` |
-| Poucos renames detectados | Baixe um pouco o threshold ou cadastre `aliases` |
+| Analisou pastas demais | Preencha `base_include` |
+| `base_include: pasta X não existe` | Nome errado — confira no Explorer (maiúsculas importam no Windows às vezes) |
+| Paths sem `ebody\...` | Você apontou `base_project_path` direto para dentro de `ebody` — OK, ou use a raiz + include |
+| Workspace vazio | Extraia o ZIP **dentro** de `workspace\` |
 | `python` não encontrado | Use `py -3 main.py` |
 
 ---
 
-## 9. O que a ferramenta NÃO faz
+## 10. O que NÃO faz
 
-- Não executa `dbt run` / `dbt compile`
-- Não consulta BigQuery
-- Não altera arquivos no repositório DBT
-- Não substitui a validação final no SaaS e no BQ
-- Não instala pacotes (`pip` / `npm` proibidos)
-
-Ela é um **orientador**. Você ainda valida SaaS + BQ no final.
+Não roda `dbt run` · não consulta BQ · não altera o repo DBT · não substitui validação SaaS/BQ.
 
 ---
 
-## 10. Estrutura de arquivos
+## 11. Arquivos do projeto
 
 ```text
-dbt-sentinel/
-├── main.py           # Execute este
-├── engine.py         # Motor de análise
-├── ui.py             # Gerador do HTML
-├── config.json       # Seus caminhos e card_id
-├── tests.py          # Suite de testes
-├── README.md         # Este documento
-├── GUIA_DE_USO.md    # Resumo rápido (apontando para cá)
-├── .gitignore
-├── workspace/        # Cole o ZIP do Jira aqui
-├── output/           # index.html + session.json
-└── snapshots/        # Histórico CARD-xxx/manifest.json
+main.py, engine.py, ui.py, tests.py, config.json
+README.md, GUIA_DE_USO.md
+workspace/   output/   snapshots/
 ```
-
-### Comandos úteis
 
 ```powershell
-# Análise do card
-py -3 main.py
-
-# Testes
-py -3 tests.py
+py -3 main.py    # análise
+py -3 tests.py   # testes
 ```
-
----
-
-## Licença / uso interno
-
-Uso interno de consultoria / engenharia de dados. Adequado a VDI corporativa restritiva.

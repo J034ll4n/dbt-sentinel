@@ -1,5 +1,6 @@
 ﻿{
   "base_project_path": "C:\\caminho\\para\\dbt\\corporativo",
+  "base_include": ["ebody", "AIS", "Rodos"],
   "workspace_path": "C:\\Users\\zirn1\\novo\\workspace",
   "output_path": "C:\\Users\\zirn1\\novo\\output",
   "snapshots_path": "C:\\Users\\zirn1\\novo\\snapshots",

@@ -64,6 +64,19 @@ def validate_config(config: dict) -> list[str]:
             errors.append("match_threshold deve estar entre 0 e 1")
     except (TypeError, ValueError):
         errors.append("match_threshold deve ser número")
+    include = config.get("base_include", [])
+    if include is None:
+        include = []
+    if not isinstance(include, list):
+        errors.append("base_include deve ser uma lista de nomes de pasta, ex.: [\"ebody\", \"AIS\"]")
+    else:
+        for name in include:
+            if not isinstance(name, str) or not name.strip():
+                errors.append("cada item de base_include deve ser texto (nome da pasta)")
+                break
+            if "/" in name or "\\" in name or ".." in name:
+                errors.append(f"base_include inválido (só o nome da pasta, sem caminho): {name!r}")
+                break
     base = config.get("base_project_path") or ""
     out = os.path.abspath(config.get("output_path") or "")
     snap = os.path.abspath(config.get("snapshots_path") or "")
@@ -75,7 +88,93 @@ def validate_config(config: dict) -> list[str]:
                 errors.append(
                     f"{label} não pode ficar dentro do projeto base (risco de gravar no DBT)"
                 )
+        for name in include if isinstance(include, list) else []:
+            if isinstance(name, str) and name.strip():
+                sub = os.path.join(base_abs, name.strip())
+                if not os.path.isdir(sub):
+                    errors.append(
+                        f"base_include: pasta '{name}' não existe em {base_abs}"
+                    )
     return errors
+
+
+def list_top_folders(root: str) -> list[str]:
+    """Pastas de 1º nível na base (ex.: AIS, ebody, Rodos)."""
+    if not root or not os.path.isdir(root):
+        return []
+    out = []
+    try:
+        for name in sorted(os.listdir(root)):
+            if name.startswith(".") or name in IGNORE_DIRS:
+                continue
+            full = os.path.join(root, name)
+            if os.path.isdir(full) and not os.path.islink(full):
+                out.append(name)
+    except OSError:
+        return []
+    return out
+
+
+def detect_domain(rel_path: str) -> str:
+    """Primeiro segmento do path relativo = pasta de negócio (ex.: ebody/models/... → ebody)."""
+    parts = (rel_path or "").replace("\\", "/").split("/")
+    if not parts or not parts[0]:
+        return ""
+    # se começa com models/, não é domínio
+    if parts[0].lower() in {"models", "macros", "seeds", "analyses", "tests", "snapshots"}:
+        return ""
+    return parts[0]
+
+
+def resolve_scan_roots(root: str, include: list[str] | None) -> list[str]:
+    """Raízes efetivas de varredura (base inteira ou só pastas de base_include)."""
+    if not root or not os.path.isdir(root):
+        return []
+    root_abs = os.path.abspath(root)
+    include = [n.strip() for n in (include or []) if isinstance(n, str) and n.strip()]
+    if not include:
+        return [root_abs]
+    roots = []
+    for name in include:
+        sub = os.path.join(root_abs, name)
+        if os.path.isdir(sub):
+            roots.append(os.path.abspath(sub))
+    return roots
+
+
+def scan_dir(root: str, include: list[str] | None = None) -> list[str]:
+    found = []
+    roots = resolve_scan_roots(root, include)
+    if not roots:
+        return found
+    root_abs = os.path.abspath(root)
+    for start in roots:
+        for dirpath, dirnames, filenames in os.walk(start, followlinks=False):
+            if safe_relpath(dirpath, root_abs) is None:
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS and not d.startswith(".")]
+            for name in filenames:
+                if name.startswith("."):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in EXTS:
+                    continue
+                full = os.path.join(dirpath, name)
+                if safe_relpath(full, root_abs) is None:
+                    continue
+                try:
+                    if os.path.islink(full):
+                        continue
+                    if os.path.getsize(full) > MAX_FILE_BYTES:
+                        continue
+                except OSError:
+                    continue
+                found.append(full)
+                if len(found) >= MAX_FILES_PER_PROJECT:
+                    return found
+    return found
+
 
 RE_REF = re.compile(r"""\{\{\s*ref\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\}\}""", re.I)
 RE_SOURCE = re.compile(
@@ -158,39 +257,6 @@ def layer_order(layer: str) -> int:
     return order.get(layer, 9)
 
 
-def scan_dir(root: str) -> list[str]:
-    found = []
-    if not root or not os.path.isdir(root):
-        return found
-    root_abs = os.path.abspath(root)
-    for dirpath, dirnames, filenames in os.walk(root_abs, followlinks=False):
-        # nunca seguir para fora do root
-        if safe_relpath(dirpath, root_abs) is None:
-            dirnames[:] = []
-            continue
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS and not d.startswith(".")]
-        for name in filenames:
-            if name.startswith("."):
-                continue
-            ext = os.path.splitext(name)[1].lower()
-            if ext not in EXTS:
-                continue
-            full = os.path.join(dirpath, name)
-            if safe_relpath(full, root_abs) is None:
-                continue
-            try:
-                if os.path.islink(full):
-                    continue
-                if os.path.getsize(full) > MAX_FILE_BYTES:
-                    continue
-            except OSError:
-                continue
-            found.append(full)
-            if len(found) >= MAX_FILES_PER_PROJECT:
-                return found
-    return found
-
-
 def parse_file(path: str, root: str) -> dict | None:
     rel = safe_relpath(path, root)
     if rel is None:
@@ -234,6 +300,7 @@ def parse_file(path: str, root: str) -> dict | None:
         "abs_path": os.path.abspath(path),
         "type": kind,
         "layer": detect_layer(rel),
+        "domain": detect_domain(rel),
         "refs": parsed.get("refs", []),
         "sources": parsed.get("sources", []),
         "joins": parsed.get("joins", []),
@@ -245,12 +312,12 @@ def parse_file(path: str, root: str) -> dict | None:
     return model
 
 
-def load_project(root: str) -> dict[str, dict]:
+def load_project(root: str, include: list[str] | None = None) -> dict[str, dict]:
     models: dict[str, dict] = {}
     collisions: list[str] = []
     if not root or not os.path.isdir(root):
         return models
-    for path in scan_dir(root):
+    for path in scan_dir(root, include=include):
         m = parse_file(path, root)
         if not m:
             continue
@@ -1116,8 +1183,23 @@ def run(config: dict) -> dict:
     config = dict(config)
     config["card_id"] = card_id
 
-    base = load_project(base_path) if base_path and os.path.isdir(base_path) else {}
-    ws = load_project(ws_path) if ws_path and os.path.isdir(ws_path) else {}
+    include = config.get("base_include") or []
+    if not isinstance(include, list):
+        include = []
+
+    top_folders = list_top_folders(base_path) if base_path and os.path.isdir(base_path) else []
+    base = (
+        load_project(base_path, include=include)
+        if base_path and os.path.isdir(base_path)
+        else {}
+    )
+    # workspace: se tiver as mesmas pastas de negócio, filtra; senão lê tudo
+    ws_include = None
+    if include and ws_path and os.path.isdir(ws_path):
+        ws_tops = set(list_top_folders(ws_path))
+        if any(n in ws_tops for n in include):
+            ws_include = [n for n in include if n in ws_tops]
+    ws = load_project(ws_path, include=ws_include) if ws_path and os.path.isdir(ws_path) else {}
 
     # grafo unificado: base + workspace (workspace sobrescreve)
     merged = dict(base)
@@ -1133,6 +1215,10 @@ def run(config: dict) -> dict:
         aliases=aliases,
         match_threshold=match_threshold,
     )
+    # anexa domínio (pasta de negócio) quando existir
+    for item in checklist:
+        src = ws.get(item["name"]) or base.get(item["name"]) or {}
+        item["domain"] = src.get("domain") or detect_domain(item.get("path", ""))
     graph = build_graph(merged)
     checklist = enrich_checklist(checklist, graph)
     patterns = learn_patterns(base)
@@ -1198,5 +1284,9 @@ def run(config: dict) -> dict:
         "patterns": patterns,
         "empty_workspace": empty_ws,
         "missing_base": missing_base,
+        "base_path": base_path,
+        "base_include": include,
+        "base_top_folders": top_folders,
+        "domains_scanned": include if include else top_folders,
     }
     return session

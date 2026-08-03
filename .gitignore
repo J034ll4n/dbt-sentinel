@@ -1,0 +1,12 @@
+﻿__pycache__/
+*.pyc
+.output_cache/
+output/*
+!output/.gitkeep
+snapshots/*
+!snapshots/.gitkeep
+workspace/*
+!workspace/.gitkeep
+.DS_Store
+Thumbs.db
+*.tmp

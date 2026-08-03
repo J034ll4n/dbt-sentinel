@@ -122,7 +122,8 @@ def test_integration() -> None:
         s = engine.run(cfg)
         assert_true(s["summary"]["novo"] >= 2, "run.novo", str(s["summary"]))
         assert_true(s["summary"]["alterado"] >= 2, "run.alterado", str(s["summary"]))
-        assert_true(s["summary"]["critical"] >= 1, "run.critical", str(s["summary"]))
+        # com add_only, refs quebradas em ALTERADO não são critical técnico
+        assert_true(s["summary"]["critical"] == 0 or s["summary"]["pending"] >= 1, "run.critical_or_pending", str(s["summary"]))
         assert_true(s["summary"]["removido"] == 0, "run.no_false_removed", str(s["summary"]))
         assert_true("sample_cliente" in s["order"], "run.order", str(s["order"]))
 
@@ -131,12 +132,32 @@ def test_integration() -> None:
         assert_true(names.get("stg_cliente") == "ALTERADO", "status.stg")
         assert_true(names.get("int_cliente") == "ALTERADO", "status.int")
         assert_true(names.get("int_novo") == "NOVO", "status.int_novo")
+        # política: ALTERADO com itens novos → acrescentar
+        assert_true(
+            s["summary"].get("acrescentar", 0) >= 1 or s["summary"].get("policy_blocks", 0) >= 1,
+            "policy_or_append",
+            str(s["summary"]),
+        )
+        assert_true(s.get("add_only") is True, "add_only.flag")
+        by_label = {c["name"]: c.get("label", "") for c in s["checklist"]}
+        assert_true("Não alterar" in by_label.get("stg_cliente", "") or "Acrescentar" in by_label.get("stg_cliente", ""),
+                    "label.add_only", by_label.get("stg_cliente"))
 
         html = ui.render(s)
         assert_true("DBT Guardian" in html, "ui.title")
         assert_true("Assistente" in html and "Arquivos" in html, "ui.tabs")
+        assert_true("Ordem" in html, "ui.ordem_tab")
         assert_true("sample_cliente" in html, "ui.has_model")
+        assert_true("Regra de ouro" in html, "ui.gold")
         assert_true("stg_empresa" in html, "ui.has_blocker")
+        assert_true("Lineage" in html or "lineage" in html, "ui.lineage_tab")
+        assert_true(isinstance(s.get("lineage"), dict) and "nodes" in s["lineage"], "lineage.nodes")
+        novo_items = next(c for c in s["checklist"] if c["name"] == "int_novo")
+        assert_true("add_count" in novo_items, "add_count.field")
+        assert_true(novo_items.get("add_summary"), "add_summary")
+        # ALTERADO com colunas novas → append
+        stg = next(c for c in s["checklist"] if c["name"] == "stg_cliente")
+        assert_true(stg.get("policy_action") in {"append", "skip"}, "stg.policy", stg.get("policy_action"))
 
         with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as f:
             f.write(html)
@@ -278,7 +299,8 @@ def test_hardening() -> None:
         "card_id": "CARD-X",
         "timestamp": "t",
         "summary": {"novo": 0, "alterado": 0, "removido": 0, "renomeado": 0, "igual": 0,
-                    "pending": 0, "critical": 0, "warning": 0, "base_models": 0, "workspace_models": 0},
+                    "pending": 0, "critical": 0, "policy_blocks": 0, "warning": 0,
+                    "base_models": 0, "workspace_models": 0},
         "message": "</script><script>alert(1)</script>",
         "checklist": [],
         "warnings": [],
@@ -287,6 +309,8 @@ def test_hardening() -> None:
         "timeline": [],
         "patterns": {},
         "empty_workspace": True,
+        "add_only": True,
+        "lineage": {"nodes": [], "edges": [], "layers": []},
     }
     html = ui.render(evil)
     assert_true("</script><script>" not in html, "xss_script_break")
@@ -397,6 +421,205 @@ def test_base_include_filters_domains() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_taxonomy_rules() -> None:
+    assert_true(engine.detect_table_kind("f_venda_dia", "mart") == "F", "kind.f")
+    assert_true(engine.detect_table_kind("dib_cliente", "mart") == "DIB", "kind.dib")
+    assert_true(engine.detect_table_kind("aggr_venda_mes", "aggregate") == "AGGR", "kind.aggr")
+    assert_true(engine.column_prefix("id_cliente") == "id", "col.id")
+    assert_true(engine.column_prefix("nm_cliente") == "nm", "col.nm")
+    assert_true(engine.COLUMN_TAXONOMY["id"] == "integer", "tax.id")
+    assert_true(engine.COLUMN_TAXONOMY["nm"] == "string", "tax.nm")
+    long = "a" * 36
+    issues = engine.check_model_name_taxonomy(long)
+    assert_true(any("35" in i for i in issues), "name.len", str(issues))
+    issues2 = engine.check_model_name_taxonomy("Bad-Name")
+    assert_true(len(issues2) >= 1, "name.case", str(issues2))
+
+    item = {
+        "name": "aggr_venda_mes",
+        "status": "NOVO",
+        "type": "model",
+        "layer": "aggregate",
+        "refs": ["stg_cliente"],
+        "columns": ["xx_invalido", "id_cliente"],
+    }
+    ws = engine.validate_taxonomy(item, {"stg_cliente": {"layer": "staging"}})
+    labels = " ".join(w["message"] for w in ws)
+    assert_true("fato" in labels.lower() or "dimensão" in labels.lower() or "dimens" in labels.lower(),
+                "aggr.origin", labels)
+    assert_true(any("xx" in w["message"] for w in ws), "bad.prefix", str(ws))
+
+
+def test_additive_items_and_lineage() -> None:
+    base_m = {"columns": ["id_cliente", "nm_nome"], "refs": ["stg_a"], "sources": [], "joins": [], "casts": [],
+              "content_hash": "aaa", "hash": "h1"}
+    ws_m = {"columns": ["id_cliente", "nm_nome", "dt_ref"], "refs": ["stg_a", "stg_b"], "sources": [],
+            "joins": [], "casts": [], "content_hash": "bbb", "hash": "h2"}
+    adds = engine.compute_add_items(ws_m, base_m)
+    names = {a["name"] for a in adds}
+    assert_true("dt_ref" in names, "add.col", str(names))
+    assert_true("stg_b" in names, "add.ref", str(names))
+    assert_true("id_cliente" not in names, "no_existing_col", str(names))
+    ign = engine.ignored_changes(ws_m, base_m)
+    assert_true(any("SQL" in x or "corpo" in x for x in ign), "ignore.body", str(ign))
+
+    all_new = engine.compute_add_items({"columns": ["aa_x", "nm_y"], "refs": [], "sources": [], "joins": [], "casts": []}, None)
+    assert_true(len(all_new) == 2, "novo.all_cols", str(all_new))
+
+
+def test_topo_order_layers() -> None:
+    """Ordem: stg antes de dim/fato; fato antes de aggr (mesmo com deps)."""
+    checklist = [
+        {"name": "aggr_x", "layer": "aggregate", "table_kind": "AGGR",
+         "policy_action": "create", "status": "NOVO"},
+        {"name": "f_viagem", "layer": "mart", "table_kind": "F",
+         "policy_action": "create", "status": "NOVO"},
+        {"name": "stg_a", "layer": "staging", "table_kind": None,
+         "policy_action": "create", "status": "NOVO"},
+        {"name": "dib_b", "layer": "mart", "table_kind": "DIB",
+         "policy_action": "append", "status": "ALTERADO"},
+    ]
+    graph = {
+        "stg_a": {"refs": [], "dependents": ["dib_b", "f_viagem"]},
+        "dib_b": {"refs": ["stg_a"], "dependents": []},
+        "f_viagem": {"refs": ["stg_a"], "dependents": ["aggr_x"]},
+        "aggr_x": {"refs": ["f_viagem"], "dependents": []},
+    }
+    order = engine.topo_order(checklist, graph)
+    assert_true(order.index("stg_a") < order.index("dib_b"), "stg_before_dib", str(order))
+    assert_true(order.index("stg_a") < order.index("f_viagem"), "stg_before_f", str(order))
+    assert_true(order.index("f_viagem") < order.index("aggr_x"), "f_before_aggr", str(order))
+
+
+def test_declared_sources_warning() -> None:
+    models = {
+        "sources_yml": {
+            "name": "sources_yml", "type": "source", "path": "models/sources.yml",
+            "sources": [["raw", "cars"]], "refs": [], "columns": [],
+        },
+        "stg_x": {
+            "name": "stg_x", "type": "model", "path": "models/stg_x.sql",
+            "sources": [["raw", "missing"]], "refs": [], "columns": [],
+        },
+    }
+    declared = engine.collect_declared_sources(models)
+    assert_true("source.raw.cars" in declared, "declared.ok", str(declared))
+    assert_true("source.raw.missing" not in declared, "usage_not_declared", str(declared))
+
+    checklist = [{
+        "name": "stg_x", "status": "NOVO", "policy_action": "create",
+        "layer": "staging", "refs": [], "sources": [["raw", "missing"]],
+        "type": "model", "columns": [],
+    }]
+    graph = {"stg_x": {"refs": ["source.raw.missing"], "dependents": []}}
+    ws = engine.validate(
+        checklist, graph, models, {},
+        add_only=True, enforce_taxonomy=False, declared_sources=declared,
+    )
+    assert_true(
+        any(w.get("label") == "Sources" and "missing" in w.get("message", "") for w in ws),
+        "warn.undeclared_source",
+        str(ws),
+    )
+
+
+def test_verify_card_create_missing() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        base = os.path.join(td, "base")
+        os.makedirs(os.path.join(base, "models"), exist_ok=True)
+        with open(os.path.join(base, "models", "stg_ok.sql"), "w", encoding="utf-8") as f:
+            f.write("select id_carro, nm_modelo from x\n")
+        cfg = {"base_project_path": base, "base_include": []}
+        session = {
+            "card_id": "T-1",
+            "checklist": [
+                {"name": "stg_ok", "policy_action": "create", "status": "NOVO", "add_items": []},
+                {"name": "stg_falta", "policy_action": "create", "status": "NOVO", "add_items": []},
+                {
+                    "name": "dib_x", "policy_action": "append", "status": "ALTERADO",
+                    "match_name": "stg_ok",
+                    "add_items": [
+                        {"kind": "coluna", "name": "id_carro"},
+                        {"kind": "coluna", "name": "nm_falta"},
+                    ],
+                },
+            ],
+        }
+        report = engine.verify_card(cfg, session)
+        assert_true("stg_ok" in report["created_ok"], "verify.create_ok", str(report))
+        assert_true("stg_falta" in report["created_missing"], "verify.create_missing", str(report))
+        assert_true("stg_ok" in report["append_partial"], "verify.append_partial", str(report))
+        assert_true(report["complete"] is False, "verify.incomplete", str(report))
+
+
+def test_ui_domain_and_lineage_svg() -> None:
+    session = {
+        "card_id": "DEMO",
+        "timestamp": "2026-01-01T00:00:00",
+        "message": "",
+        "summary": {
+            "base_models": 1, "workspace_models": 2, "novo": 1, "acrescentar": 1,
+            "nao_alterar": 0, "revisar": 0, "igual": 0, "critical": 0, "warning": 0,
+            "pending": 2, "renomeado": 0, "alterado": 1, "removido": 0,
+        },
+        "checklist": [
+            {
+                "name": "stg_a", "status": "NOVO", "policy_action": "create",
+                "domain": "ebody", "layer": "staging", "path": "ebody/stg_a.sql",
+                "label": "Criar", "bucket": "criar", "hint": "", "add_count": 0,
+                "add_items": [], "add_summary": "", "refs": [], "sources": [],
+                "columns": [], "suggested_order": 1, "type": "model",
+            },
+            {
+                "name": "stg_b", "status": "NOVO", "policy_action": "create",
+                "domain": "ais", "layer": "staging", "path": "ais/stg_b.sql",
+                "label": "Criar", "bucket": "criar", "hint": "", "add_count": 0,
+                "add_items": [], "add_summary": "", "refs": [], "sources": [],
+                "columns": [], "suggested_order": 2, "type": "model",
+            },
+        ],
+        "warnings": [],
+        "lineage": {
+            "layers": ["staging", "mart"],
+            "nodes": [
+                {
+                    "id": "stg_a", "label": "stg_a", "visual": "new", "layer": "staging",
+                    "used_by": ["dib_x", "f_y"], "add_count": 0, "upstream": [],
+                    "downstream": ["dib_x", "f_y"], "depends_on": [], "add_items": [],
+                    "policy_action": "create", "columns": [],
+                },
+                {
+                    "id": "dib_x", "label": "dib_x", "visual": "exist", "layer": "mart",
+                    "used_by": [], "add_count": 0, "upstream": ["stg_a"],
+                    "downstream": [], "depends_on": ["stg_a"], "add_items": [],
+                    "policy_action": "exists", "columns": [],
+                },
+                {
+                    "id": "f_y", "label": "f_y", "visual": "new", "layer": "mart",
+                    "used_by": [], "add_count": 0, "upstream": ["stg_a"],
+                    "downstream": [], "depends_on": ["stg_a"], "add_items": [],
+                    "policy_action": "create", "columns": [],
+                },
+            ],
+            "edges": [
+                {"from": "stg_a", "to": "dib_x"},
+                {"from": "stg_a", "to": "f_y"},
+            ],
+        },
+        "execution_order": ["stg_a", "stg_b"],
+        "add_only": True,
+        "patterns": {},
+        "top_folders": [],
+        "base_include": [],
+    }
+    html = ui.render(session)
+    assert_true("Negócio: ebody" in html and "Negócio: ais" in html, "ui.domain_groups", "")
+    assert_true('id="ln-svg"' in html, "ui.ln_svg", "")
+    assert_true('id="ln-breadcrumb"' in html, "ui.ln_crumb", "")
+    assert_true("drawEdges" in html or "ln-svg" in html, "ui.edges_js", "")
+    assert_true("→ 2" in html or "se divide" in html.lower() or "ln-fan" in html, "ui.fan", "")
+
+
 def main() -> None:
     print("=== DBT Guardian tests ===")
     test_parse_sql()
@@ -410,6 +633,12 @@ def main() -> None:
     test_yaml_models_not_sources()
     test_exclusive_rename_no_double_claim()
     test_base_include_filters_domains()
+    test_taxonomy_rules()
+    test_additive_items_and_lineage()
+    test_topo_order_layers()
+    test_declared_sources_warning()
+    test_verify_card_create_missing()
+    test_ui_domain_and_lineage_svg()
     print()
     print(f"Passed: {passed}  Failed: {failed}")
     if failed:

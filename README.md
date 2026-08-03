@@ -1,268 +1,191 @@
-# DBT Sentinel (Guardian)
+# DBT Sentinel
 
-Ferramenta de **orientação visual** para migrar pacotes SaaS/Jira para o repositório DBT corporativo.
+**Analisador de impacto para migrações dbt em ambientes restritos.**
 
-Compara o ZIP do card com o projeto base, mostra o que **criar**, **atualizar**, o que é o **mesmo objeto com outro nome**, o **fluxo** e os **bloqueios** — em HTML simples.
+Compara o pacote de entrega (ZIP de um card) com o projeto dbt corporativo e gera um assistente visual em HTML: o que criar, o que acrescentar, ordem de dependências, lineage e alertas de política — **sem gravar nada** no repositório dbt.
 
-| | |
+Feito para consultoria em VDIs travadas, onde `pip`, `npm`, Docker e plugins de IDE não estão disponíveis.
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Dependências](https://img.shields.io/badge/deps-somente%20stdlib-success)](#stack)
+[![Licença](https://img.shields.io/badge/license-ver%20repositório-lightgrey)](#)
+
+---
+
+## Por que existe
+
+Levar modelos dbt gerados em SaaS para um repositório corporativo grande é arriscado:
+
+- O pacote mistura **arquivos novos** com **alterações em modelos que já existem**
+- Nomes divergem (`stg_cliente` vs `stg_clientes`) e o time acaba duplicando objeto
+- É preciso uma decisão clara: **criar / acrescentar / não mexer** — não um overwrite cego
+- Muitos ambientes bloqueiam instalação de pacotes — a ferramenta precisa rodar só com **stdlib do Python**
+
+O DBT Sentinel transforma essa comparação em checklist guiado + visão de lineage.
+
+```text
+ZIP do card (workspace)  +  dbt corporativo (base, somente leitura)
+              ↓
+        análise no engine
+              ↓
+   output/index.html  ·  session.json  ·  snapshot opcional
+```
+
+---
+
+## Funcionalidades
+
+| Capacidade | O que entrega |
 |---|---|
-| **Ambiente** | VDI restrita (sem pip, npm, Docker, plugins) |
-| **Stack** | Python stdlib + HTML/CSS/JS puro |
-| **Sobre o DBT** | **Somente leitura** — não altera o repositório corporativo |
-| **Como rodar** | `py -3 main.py` |
-
-Repositório: https://github.com/J034ll4n/dbt-sentinel
-
----
-
-## Índice
-
-1. [Para que serve](#1-para-que-serve)
-2. [Qual caminho colar no config (LEIA ISTO)](#2-qual-caminho-colar-no-config-leia-isto)
-3. [Guia passo a passo (para leigos)](#3-guia-passo-a-passo-para-leigos)
-4. [O que aparece na tela](#4-o-que-aparece-na-tela)
-5. [Configuração completa](#5-configuração-completa)
-6. [Arquitetura](#6-arquitetura)
-7. [Segurança](#7-segurança)
-8. [Testes](#8-testes)
-9. [Troubleshooting](#9-troubleshooting)
-10. [O que NÃO faz](#10-o-que-não-faz)
-11. [Arquivos do projeto](#11-arquivos-do-projeto)
+| **Política aditiva** | Prioriza *criar arquivos novos* e *acrescentar só colunas/refs novas*; por padrão não reescreve SQL antigo |
+| **Checklist de impacto** | Agrupado por ação (criar / acrescentar / revisar) e domínio de negócio |
+| **Ordem de execução** | Ordem topológica: source → sample → staging → intermediate → dim/fato → aggregate |
+| **Lineage interativo** | Faixas por camada com setas SVG que **se dividem** quando um modelo alimenta vários |
+| **Detecção de rename** | Matching fuzzy + aliases para marcar “mesmo objeto, outro nome” |
+| **Taxonomia** | Convenções de nome e prefixo de coluna (F / DIB / AGGR, `id_`, `nm_`, …) |
+| **Sources** | Avisa se `source('…')` é usado sem declaração em `sources.yml` |
+| **Verificação final** | Ao finalizar, relê a base e reporta criado / acrescentado / faltando / parcial |
+| **I/O endurecido** | Escreve só em `output/` e `snapshots/`; proteção de path; HTML escapado |
 
 ---
 
-## 1. Para que serve
+## Stack
 
-Auxilia a migração de SaaS para DBT em ambientes restritos.
+| Camada | Escolha | Motivo |
+|---|---|---|
+| Runtime | Python 3 (stdlib) | Sem `pip` / venv em VDI fechada |
+| UI | HTML + CSS + JS em um arquivo | Abre no navegador; sem build |
+| Parsing | Regex / YAML leve | Scan estrutural rápido de `.sql` / `.yml` |
+| Persistência | Sessão JSON + snapshots | Rastro por card |
 
-1. Você recebe um **card no Jira** com um ZIP do fluxo SaaS DBT.
-2. Precisa levar isso para o **repositório corporativo** (source → sample → stg → int → aggregate).
-3. O Sentinel compara os dois lados e gera um assistente no navegador.
-
-```text
-ZIP do Jira (workspace/)  +  Projeto DBT (base)  →  output/index.html
-```
-
----
-
-## 2. Qual caminho colar no config (LEIA ISTO)
-
-Na empresa o DBT costuma ter **uma pasta raiz** e **várias pastas de negócio** dentro (ex.: `AIS`, `ebody`, `Rodos`, `impress_code`, `schemas`…).
-
-Você **não precisa** analisar tudo. O Sentinel deixa você **tunelar** só os negócios do card.
-
-### Exemplo real da estrutura
-
-```text
-C:\projetos\dbt-corporativo\          ← ESTA é a pasta BASE (cole no config)
-├── AIS\
-│   └── models\staging\...
-├── ebody\
-│   └── models\staging\...
-│   └── models\intermediate\...
-├── Rodos\
-│   └── models\...
-├── impress_code\
-├── schemas\
-└── (outras pastas que você IGNORA)
-```
-
-### O que colar no `config.json`
-
-| Campo | O que colocar | Exemplo |
-|-------|----------------|---------|
-| `base_project_path` | Caminho da **pasta raiz** do DBT (a que contém AIS, ebody, Rodos…) | `C:\\projetos\\dbt-corporativo` |
-| `base_include` | **Só** os nomes das pastas de negócio deste card (lista) | `["ebody", "AIS", "Rodos"]` |
-
-Exemplo pronto para copiar:
-
-```json
-{
-  "base_project_path": "C:\\projetos\\dbt-corporativo",
-  "base_include": ["ebody", "AIS", "Rodos"],
-  "workspace_path": "C:\\Users\\zirn1\\novo\\workspace",
-  "output_path": "C:\\Users\\zirn1\\novo\\output",
-  "snapshots_path": "C:\\Users\\zirn1\\novo\\snapshots",
-  "card_id": "CARD-100"
-}
-```
-
-### Como descobrir o caminho certo no Windows
-
-1. Abra o Explorer na pasta do DBT.
-2. Clique na barra de endereço → copie o caminho completo.
-3. No `config.json`, use barras duplas: `C:\\projetos\\dbt-corporativo`
-4. Em `base_include`, coloque **apenas o nome** da pasta (sem `C:\` e sem `\models`):
-   - Certo: `"ebody"`
-   - Errado: `"C:\\projetos\\dbt-corporativo\\ebody"`
-   - Errado: `"ebody\\models"`
-
-### Duas formas de usar
-
-**A) Recomendado — raiz + filtro (vários negócios no mesmo card)**
-
-```json
-"base_project_path": "C:\\projetos\\dbt-corporativo",
-"base_include": ["ebody", "AIS", "Rodos"]
-```
-
-O Sentinel analisa **somente** essas pastas. O resto da árvore é ignorado.
-
-**B) Um negócio só — apontar direto para a pasta**
-
-```json
-"base_project_path": "C:\\projetos\\dbt-corporativo\\ebody",
-"base_include": []
-```
-
-### O que o terminal mostra
-
-```text
-  Pasta base: C:\projetos\dbt-corporativo
-  Pastas encontradas na base: AIS, ebody, Rodos, impress_code, schemas
-  Analisando SOMENTE: ebody, AIS, Rodos
-```
-
-### Workspace (ZIP do Jira)
-
-- Extraia o ZIP em `workspace\`
-- Se o ZIP tiver as mesmas pastas (`ebody`, `AIS`…), o filtro `base_include` também se aplica
-- Se o ZIP vier “achatado” (só `models\...`), o Sentinel lê o workspace inteiro
+Zero dependência Python de terceiros. Zero bundler de frontend.
 
 ---
 
-## 3. Guia passo a passo (para leigos)
+## Como rodar
 
-### Primeira vez
-
-1. Confirme Python 3 (`py -3 --version`).
-2. Abra `config.json`.
-3. Cole `base_project_path` = pasta **raiz** do DBT.
-4. Preencha `base_include` com as pastas do card (ex.: `ebody`, `AIS`, `Rodos`).
-5. Salve.
-
-### Todo card
-
-| # | O que fazer | Onde |
-|---|-------------|------|
-| 1 | `git pull` no DBT | VSCode do DBT |
-| 2 | Baixar ZIP do Jira | Portal |
-| 3 | Limpar `workspace\` | Explorer |
-| 4 | Extrair ZIP **dentro** de `workspace\` | Explorer |
-| 5 | Ajustar `card_id` e `base_include` | `config.json` |
-| 6 | `py -3 main.py` | Terminal do Sentinel |
-| 7 | Conferir “Analisando SOMENTE: …” | Terminal |
-| 8 | Abrir `output\index.html` | Navegador |
-| 9 | Seguir Assistente (Passos 1→4) | HTML |
-| 10 | Copiar/atualizar no DBT | VSCode |
-| 11 | Validar SaaS + BigQuery | Ambientes |
-| 12 | Responder `S` no terminal | Snapshot |
-| 13 | Limpar `workspace\` | Explorer |
-
-### Regra de ouro
-
-Sem bloqueios vermelhos → marcar feitos → SaaS OK + BQ OK → só então `S`.
-
-### Ordem do fluxo
-
-```text
-source → sample (1%) → staging → intermediate → aggregate/mart
+```bash
+git clone https://github.com/J034ll4n/dbt-sentinel.git
+cd dbt-sentinel
 ```
 
----
+1. Edite o `config.json` — aponte `base_project_path` para a raiz do dbt (somente leitura) e coloque o extrato do card em `workspace/`.
+2. Execute:
 
-## 4. O que aparece na tela
-
-| Aba | Função |
-|-----|--------|
-| **Assistente** | Bloqueios → criar → atualizar/renomear → SaaS/BQ |
-| **Arquivos** | Checklist com path (inclui pasta de negócio) |
-| **Fluxo** | Cadeia source → final |
-| **Alertas** | Bloqueios + histórico |
-
-| Status | Significado |
-|--------|-------------|
-| Criar | Arquivo novo |
-| Atualizar | Já existe e mudou |
-| Nome diferente | Mesmo objeto, outro nome — **não duplicar** |
-| Pronto | Igual (estrutura e SQL) |
-
----
-
-## 5. Configuração completa
-
-```json
-{
-  "base_project_path": "C:\\projetos\\dbt-corporativo",
-  "base_include": ["ebody", "AIS", "Rodos"],
-  "workspace_path": "C:\\Users\\zirn1\\novo\\workspace",
-  "output_path": "C:\\Users\\zirn1\\novo\\output",
-  "snapshots_path": "C:\\Users\\zirn1\\novo\\snapshots",
-  "card_id": "CARD-100",
-  "detect_removed": false,
-  "match_threshold": 0.62,
-  "aliases": {},
-  "allow_empty_base": false,
-  "require_git_integrity": false
-}
+```bash
+py -3 main.py
 ```
 
-| Campo | Significado |
-|-------|-------------|
-| `base_project_path` | Raiz do DBT |
-| `base_include` | Pastas de negócio a analisar (vazio = tudo) |
-| `workspace_path` | ZIP extraído |
-| `output_path` / `snapshots_path` | Saídas (**fora** do DBT) |
-| `card_id` | ID do card |
-| `detect_removed` | `false` para ZIP parcial |
-| `match_threshold` | Sensibilidade de renomeação |
-| `aliases` | nome-ZIP → nome-projeto |
+3. Abra `output/index.html` e use as abas **Assistente**, **Ordem**, **Arquivos**, **Lineage** e **Alertas**.
 
----
+### Demo incluída
 
-## 6. Arquitetura
+O repositório traz uma base de exemplo em `demo_base/` e um script auxiliar:
 
-```text
-main.py / engine.py / ui.py — stdlib only
+```bash
+py -3 run_demo.py
 ```
 
----
+Depois abra `output/index.html` para ver criar/acrescentar e o fan-out do lineage sem precisar de um repo corporativo.
 
-## 7. Segurança
+### Testes
 
-Somente leitura na base · escrita só em output/snapshots · paths seguros · XSS escapado · `base_include` validado.
-
----
-
-## 8. Testes
-
-```powershell
+```bash
 py -3 tests.py
 ```
 
 ---
 
-## 9. Troubleshooting
+## Configuração (visão geral)
 
-| Problema | Solução |
-|----------|---------|
-| Analisou pastas demais | Preencha `base_include` |
-| Pasta X não existe | Confira o nome no Explorer |
-| Workspace vazio | Extraia o ZIP **dentro** de `workspace\` |
-| `python` não encontrado | Use `py -3 main.py` |
+```json
+{
+  "base_project_path": "caminho/para/dbt-raiz",
+  "base_include": ["dominio_a", "dominio_b"],
+  "workspace_path": "workspace",
+  "output_path": "output",
+  "snapshots_path": "snapshots",
+  "card_id": "CARD-123",
+  "add_only": true,
+  "enforce_taxonomy": true,
+  "detect_removed": false,
+  "match_threshold": 0.62
+}
+```
+
+| Campo | Função |
+|---|---|
+| `base_project_path` | Raiz do dbt corporativo (**nunca alterada**) |
+| `base_include` | Pastas de domínio opcionais para delimitar o scan |
+| `workspace_path` | Conteúdo extraído do card / ZIP |
+| `add_only` | Política aditiva (criar + só acrescer o novo) |
+| `enforce_taxonomy` | Heurísticas de nomenclatura / tipo |
+| `card_id` | Rótulo do relatório HTML e do snapshot |
+
+Checklist operacional do dia a dia: [`GUIA_DE_USO.md`](GUIA_DE_USO.md).
 
 ---
 
-## 10. O que NÃO faz
-
-Não roda `dbt run` · não consulta BQ · não altera o repo DBT · não substitui validação SaaS/BQ.
-
----
-
-## 11. Arquivos do projeto
+## Arquitetura
 
 ```text
-main.py, engine.py, ui.py, tests.py, config.json
-README.md, GUIA_DE_USO.md
-workspace/   output/   snapshots/
+┌─────────────┐     ┌──────────────────────────┐     ┌─────────────────┐
+│  config.json│────▶│  main.py (CLI + segurança)│────▶│ output/index.html│
+└─────────────┘     └────────────┬─────────────┘     │ session.json     │
+                                 │                   │ snapshots/       │
+                    ┌────────────▼─────────────┐     └─────────────────┘
+                    │  engine.py               │
+                    │  · scan e parse SQL/YAML │
+                    │  · diff + buckets de política │
+                    │  · grafo / topo / lineage│
+                    │  · validate + verify     │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  ui.py → relatório HTML  │
+                    │  autocontido             │
+                    └──────────────────────────┘
 ```
+
+---
+
+## Princípios de design
+
+1. **Somente leitura na árvore corporativa** — a análise nunca patcha modelos de produção.
+2. **Política acima de diff barulhento** — mostra *o que acrescentar*, não cada linha de churn de SQL.
+3. **Funciona offline sob lockdown de TI** — só stdlib + HTML estático.
+4. **UX na velocidade do consultor** — abas para assistente, ordem, arquivos, lineage e alertas.
+5. **Fechamento verificável** — confere a base de novo antes de gravar o snapshot do card.
+
+---
+
+## O que não é
+
+- Não substitui `dbt run` / `dbt test`
+- Não valida BigQuery nem SaaS
+- Não faz merge automático no repositório corporativo
+
+É uma **camada de decisão e impacto** antes de tocar no projeto real.
+
+---
+
+## Estrutura do projeto
+
+```text
+main.py          Entrada CLI, checagens de integridade, snapshot + verificação
+engine.py        Parse, matching, política, grafo, lineage, validate/verify
+ui.py            Gerador do relatório HTML/CSS/JS
+tests.py         Suite de testes (stdlib)
+config.json      Paths e flags de política
+run_demo.py      Gera o relatório contra demo_base/
+demo_base/       Árvore dbt de exemplo
+GUIA_DE_USO.md   Checklist rápido do operador
+```
+
+---
+
+## Autor
+
+Ferramenta prática para migração dbt sob restrições empresariais — e também peça de portfólio: enquadramento do problema, engenharia sob restrição, UX para quem não é expert, e cuidado com codebases de produção.
+
+Repositório: [github.com/J034ll4n/dbt-sentinel](https://github.com/J034ll4n/dbt-sentinel)

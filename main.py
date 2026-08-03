@@ -102,28 +102,48 @@ def assert_write_target(path: str, allowed_roots: list[str]) -> None:
     raise RuntimeError(f"Bloqueado: tentativa de gravar fora de output/snapshots: {abs_path}")
 
 
-def save_snapshot(cfg: dict, session: dict) -> str:
+def save_snapshot(cfg: dict, session: dict, verification: dict | None = None) -> str:
     card = engine.sanitize_card_id(session.get("card_id", "CARD-XXX"))
     dest = os.path.join(cfg["snapshots_path"], card)
     assert_write_target(dest, [cfg["snapshots_path"]])
     os.makedirs(dest, exist_ok=True)
+    plan = []
+    for c in session.get("checklist", []):
+        if c.get("policy_action") not in {"create", "append"}:
+            continue
+        plan.append({
+            "model": c["name"],
+            "action": c.get("policy_action"),
+            "status": c["status"],
+            "path": c.get("path", ""),
+            "domain": c.get("domain") or "",
+            "add_count": c.get("add_count", 0),
+            "add_items": c.get("add_items") or [],
+            "match_name": c.get("match_name"),
+            "label": c.get("label"),
+        })
     manifest = {
         "card_id": card,
         "timestamp": session.get("timestamp") or datetime.now().isoformat(timespec="seconds"),
+        "plan": plan,
         "changes": [
             {
                 "model": c["name"],
                 "status": c["status"],
+                "policy_action": c.get("policy_action"),
                 "path": c.get("path", ""),
                 "match_name": c.get("match_name"),
+                "add_count": c.get("add_count", 0),
             }
             for c in session.get("checklist", [])
             if c["status"] != "IGUAL"
         ],
+        "summary": session.get("summary") or {},
         "critical_count": session["summary"].get("critical", 0),
         "warning_count": session["summary"].get("warning", 0),
         "pending_count": session["summary"].get("pending", 0),
         "renomeado_count": session["summary"].get("renomeado", 0),
+        "verification": verification or {},
         "structural_hashes": {
             c["name"]: c.get("hash", "")
             for c in session.get("checklist", [])
@@ -134,6 +154,11 @@ def save_snapshot(cfg: dict, session: dict) -> str:
     assert_write_target(path, [cfg["snapshots_path"]])
     with open(path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
+    if verification:
+        vpath = os.path.join(dest, "verification.json")
+        assert_write_target(vpath, [cfg["snapshots_path"]])
+        with open(vpath, "w", encoding="utf-8") as f:
+            json.dump(verification, f, ensure_ascii=False, indent=2)
     return path
 
 
@@ -145,16 +170,77 @@ def print_summary(session: dict) -> None:
     print("=" * 56)
     print(f"  Base:      {s['base_models']} arquivo(s)")
     print(f"  Workspace: {s['workspace_models']} arquivo(s)")
-    print(f"  Criar:     {s['novo']}")
-    print(f"  Atualizar: {s['alterado']}")
-    print(f"  Nome ≠:    {s.get('renomeado', 0)}")
-    print(f"  Verificar: {s['removido']}")
-    print(f"  Pronto:    {s['igual']}")
-    print(f"  Bloqueios: {s['critical']}")
-    print(f"  Pendentes: {s['pending']}")
+    print(f"  Criar:        {s.get('novo', 0)}")
+    print(f"  Acrescentar:  {s.get('acrescentar', 0)}")
+    print(f"  Não alterar:  {s.get('nao_alterar', 0)}")
+    print(f"  Revisar:      {s.get('revisar', 0)}")
+    print(f"  Já na base:   {s.get('igual', 0)}")
+    print(f"  Bloqueios:    {s.get('critical', 0)}")
+    print(f"  Pendentes:    {s.get('pending', 0)}")
     if session.get("message"):
         print()
         print(f"  → {session['message']}")
+    print("=" * 56)
+
+
+def print_config_wizard(cfg: dict) -> None:
+    """Guia de paths no start."""
+    base = cfg.get("base_project_path") or ""
+    ws = cfg.get("workspace_path") or ""
+    print()
+    print("--- Configuração ---")
+    print(f"  Card:      {cfg.get('card_id')}")
+    print(f"  Base:      {base}")
+    print(f"  Workspace: {ws}")
+    print(f"  Output:    {cfg.get('output_path')}")
+    print(f"  Snapshots: {cfg.get('snapshots_path')}")
+
+    if base and os.path.isdir(base):
+        tops = engine.list_top_folders(base)
+        inc = cfg.get("base_include") or []
+        print(f"  Pastas na base ({len(tops)}): {', '.join(tops) if tops else '(nenhuma)'}")
+        if inc:
+            print(f"  Analisando SOMENTE ({len(inc)}): {', '.join(inc)}")
+            missing = [n for n in inc if n not in tops]
+            if missing:
+                print(f"  AVISO: base_include não encontrado: {', '.join(missing)}")
+        elif tops and len(tops) > 3:
+            print("  AVISO: muitas pastas e base_include vazio — pode ficar lento.")
+            print('  Dica: "base_include": ["ebody", "AIS"]')
+    else:
+        print("  AVISO: base_project_path inválido ou inexistente.")
+
+    if ws and os.path.isdir(ws):
+        ws_tops = engine.list_top_folders(ws)
+        sql_count = 0
+        for root, _dirs, files in os.walk(ws):
+            sql_count += sum(1 for f in files if f.lower().endswith((".sql", ".yml", ".yaml")))
+            if sql_count > 500:
+                break
+        print(f"  Workspace OK — pastas: {', '.join(ws_tops) if ws_tops else '(plana)'}")
+        print(f"  Arquivos .sql/.yml encontrados (amostra): ~{sql_count}")
+        if sql_count == 0:
+            print("  AVISO: workspace sem .sql/.yml — extraia o ZIP do card dentro desta pasta.")
+    else:
+        print("  AVISO: workspace_path inválido ou inexistente.")
+    print("--------------------")
+
+
+def print_verification(report: dict) -> None:
+    print()
+    print("=" * 56)
+    print("  VERIFICAÇÃO FINAL DO CARD")
+    print("=" * 56)
+    print(report.get("summary_text") or "")
+    if report.get("complete"):
+        print()
+        print("  ✓ Tudo que o card pediu parece estar na base.")
+    else:
+        print()
+        print("  ✗ Ainda há pendências ou acrescentos incompletos.")
+        print("  Revise a lista acima antes de fechar o card no Jira.")
+    if report.get("diverged"):
+        print("  (Houve diferenças manuais/SQL ignoradas — valide SaaS/BQ.)")
     print("=" * 56)
 
 
@@ -191,19 +277,7 @@ def main() -> None:
         print("  A ferramenta não grava na base, mas não há checagem automática.")
 
     # Mostra pastas de negócio encontradas vs filtradas
-    if base and os.path.isdir(base):
-        tops = engine.list_top_folders(base)
-        inc = cfg.get("base_include") or []
-        print()
-        print(f"  Pasta base: {base}")
-        if tops:
-            print(f"  Pastas encontradas na base: {', '.join(tops)}")
-        if inc:
-            print(f"  Analisando SOMENTE: {', '.join(inc)}")
-        elif tops and len(tops) > 3:
-            print("  AVISO: muitas pastas na base e base_include está vazio.")
-            print('  Dica: no config.json use "base_include": ["ebody", "AIS", "Rodos"]')
-            print("  para analisar só os negócios que importam.")
+    print_config_wizard(cfg)
 
     try:
         session = engine.run(cfg)
@@ -260,22 +334,34 @@ def main() -> None:
         print(f"Não é possível finalizar: ainda há {s['critical']} bloqueio(s) CRITICAL.")
         print("Resolva os bloqueios, rode novamente e tente de novo.")
         return
-    if s["pending"] > 0:
-        print(f"Aviso: ainda há {s['pending']} item(ns) pendente(s) no checklist.")
+
+    print()
+    print("Conferindo a base (o que foi criado/acrescentado de fato)...")
+    try:
+        verification = engine.verify_card(cfg, session)
+    except Exception as e:
+        print(f"AVISO: falha na verificação final: {e}")
+        verification = {"complete": False, "summary_text": str(e), "details": []}
+    print_verification(verification)
+
+    if not verification.get("complete"):
         try:
-            conf = input("Finalizar mesmo assim? (S/N): ").strip().upper()
+            conf = input("Ainda há pendências. Finalizar snapshot mesmo assim? (S/N): ").strip().upper()
         except EOFError:
             conf = "N"
         if conf != "S":
-            print("Snapshot cancelado.")
+            print("Snapshot cancelado. Ajuste a base e rode de novo para re-verificar.")
             return
+    elif s["pending"] > 0:
+        print(f"Aviso: checklist ainda tinha {s['pending']} pendente(s) na análise inicial.")
 
     try:
-        path = save_snapshot(cfg, session)
+        path = save_snapshot(cfg, session, verification)
     except (OSError, RuntimeError) as e:
         print(f"ERRO ao salvar snapshot: {e}")
         sys.exit(1)
     print(f"Snapshot salvo em: {path}")
+    print("  (manifest.json = plano + verificação; verification.json = detalhe)")
     print("Limpe a pasta workspace/ e atualize card_id no config.json para o próximo card.")
 
 

@@ -393,7 +393,7 @@ def _ordem(session: dict) -> str:
         jump = (
             f'<p class="jump-row">'
             f'<button type="button" class="jump-link" data-open-macro="{_esc(c["name"])}">'
-            f"Abrir Macro</button></p>"
+            f"Abrir zoom do arquivo</button></p>"
         )
         steps.append(
             f"""
@@ -522,8 +522,7 @@ def _wizard(session: dict) -> str:
         if ordered:
             lis = "".join(f"<li>{i+1}. <code>{_esc(n)}</code></li>" for i, n in enumerate(ordered))
             order_html = (
-                "<p class=\"guide\">Veja a aba <strong>Ordem</strong> para o passo a passo completo. "
-                "Prévia:</p>"
+                "<p class=\"guide\">Prévia da sequência — abra <strong>Ordem</strong> para copiar snippets:</p>"
                 f"<ol class=\"order-list\">{lis}</ol>"
             )
 
@@ -569,7 +568,8 @@ def _wizard(session: dict) -> str:
             + mini(rems, "Nada para verificar."),
         )
 
-    # Taxonomia
+    # Taxonomia só se houver aviso (não polui a jornada)
+    tax_step = ""
     if tax:
         lis = "".join(
             f"<li><strong>{_esc(w.get('label',''))}</strong> · "
@@ -577,51 +577,57 @@ def _wizard(session: dict) -> str:
             f"<br><span class=\"action\">→ {_esc(w.get('action',''))}</span></li>"
             for w in tax[:40]
         )
-        tax_html = (
-            "<p class=\"guide\">Se a IA/ZIP fugiu da taxonomia, aparece aqui. "
-            "Nomes: minúsculas, <code>_</code>, máx. 35. Tipos: F / DIB / AGGR. "
-            "Colunas: prefixo → tipo (id→integer, nm→string, …).</p>"
-            f"<ul class=\"tax-list\">{lis}</ul>"
+        tax_step = step(
+            4 if not (add_only and attn) else 5,
+            "Atenções de nome / tipo",
+            len(tax),
+            "<p class=\"guide\">Revise se o ZIP fugiu do padrão. Detalhe também na aba <strong>Atenções</strong>.</p>"
+            f"<ul class=\"tax-list\">{lis}</ul>",
+            "step-stop",
         )
-        tax_count = len(tax)
-    else:
-        tax_html = "<p class=\"ok-msg\">Sem alertas de taxonomia nos arquivos novos.</p>"
-        tax_count = 0
 
     gold = ""
     if add_only:
         gold = """
 <div class="gold-rule">
-  <strong>Regra de ouro</strong>
+  <strong>Seu trabalho no card</strong>
   <p>
-    <span class="tag new">Criar</span> o que é arquivo novo ·
-    <span class="tag append">Acrescentar</span> só itens novos em arquivo que já existe ·
-    <span class="tag block">Não reescrever</span> o código antigo (mesmo com erros no ZIP).
+    Olhe o arquivo principal na base → veja o que <span class="tag append">já existe</span>
+    e o que <span class="tag new">precisa colocar</span> → acrescente só as diferenças → rode o dbt.
+    <span class="tag block">Não reescreva</span> o principal.
   </p>
 </div>
+<p class="journey-cta">
+  <label for="t2" class="btn-go-order">Abrir Diff</label>
+  <label for="t3" class="btn-go-order ghost">Depois: Ordem</label>
+</p>
 """
 
-    return (
-        gold
-        + step(1, "Resolver bloqueios dos NOVOS", len(criticals), c_html, "step-block" if criticals else "")
-        + step(2, "Criar arquivos novos", len(novos), create_html + order_html, "step-go" if novos else "")
-        + step(3, "Acrescentar só o novo (arquivo já existe)", len(acres), append_html, "step-append" if acres else "")
-        + policy_step
-        + step(5, "Conferir taxonomia (nome e tipos)", tax_count, tax_html)
-        + """
+    parts = [
+        gold,
+        step(1, "Resolver bloqueios dos NOVOS", len(criticals), c_html, "step-block" if criticals else ""),
+        step(2, "Criar arquivos novos", len(novos), create_html + order_html, "step-go" if novos else ""),
+        step(3, "Acrescentar só o novo (arquivo já existe)", len(acres), append_html, "step-append" if acres else ""),
+    ]
+    if add_only:
+        parts.append(policy_step)
+    else:
+        parts.append(policy_step)
+    if tax_step:
+        parts.append(tax_step)
+    parts.append("""
 <section class="step">
   <div class="step-head">
-    <span class="step-num">6</span>
-    <h3>Validar no SaaS e BigQuery</h3>
+    <span class="step-num">✓</span>
+    <h3>Validar SaaS + BigQuery e fechar</h3>
   </div>
-  <p class="guide">Depois de criar/acrescentar no DBT (siga a aba <strong>Ordem</strong>):</p>
-  <label class="check"><input type="checkbox" data-item="__saas__"> SaaS OK — validei no ambiente SaaS</label>
-  <label class="check"><input type="checkbox" data-item="__bq__"> BQ OK — validei no BigQuery</label>
-  <p class="hint">No terminal, responda <strong>S</strong>: o Guardian re-lê a base, mostra a verificação final
-  (criados / acrescentados / faltando) e só então grava o snapshot.</p>
+  <p class="guide">Depois de executar a aba <strong>Ordem</strong>:</p>
+  <label class="check"><input type="checkbox" data-item="__saas__"> SaaS OK</label>
+  <label class="check"><input type="checkbox" data-item="__bq__"> BigQuery OK</label>
+  <p class="hint">No terminal, <strong>S</strong> → o Guardian lista só o que ainda falta e grava o snapshot.</p>
 </section>
-"""
-    )
+""")
+    return "".join(parts)
 
 
 def _flow(session: dict) -> str:
@@ -680,8 +686,7 @@ def _flow(session: dict) -> str:
   </div>
   <div class="ln-breadcrumb" id="ln-breadcrumb">Clique num card para ver o caminho: origem → … → destino</div>
   <p class="guide">
-    As setas saem do card de origem e <strong>se dividem</strong> quando ele alimenta vários.
-    Ex.: <code>stg_carros</code> → <code>dib_carro</code> e → <code>f_evento_manutencao</code>.
+    Fluxo deste card: setas saem da origem e <strong>se dividem</strong> quando alimenta vários arquivos.
   </p>
   <div class="lineage-grid">
     <div class="ln-board-wrap" id="ln-board-wrap">
@@ -735,15 +740,14 @@ def _macro(session: dict) -> str:
     </div>
   </div>
   <p class="guide" id="macro-subtitle">
-    Escolha um arquivo: veja onde ele se encaixa no grafo corporativo.
-    <strong>Micro</strong> (aba Lineage) = o card inteiro ·
-    <strong>Macro</strong> = um arquivo + vizinhos da base.
+    Escolha um arquivo e veja onde ele se encaixa na base.
+    Verde = criar ou itens novos · cinza = já existe.
   </p>
   <p class="impact-line" id="macro-recompile" hidden></p>
   <div class="macro-addbar" id="macro-addbar" hidden></div>
   <div id="macro-snippet"></div>
   <p class="jump-row">
-    <button type="button" class="jump-link" id="macro-to-lineage">Ver no Lineage</button>
+    <button type="button" class="jump-link" id="macro-to-lineage">Ver no fluxo do card</button>
   </p>
   <div class="lineage-grid">
     <div class="ln-board-wrap" id="macro-board-wrap">
@@ -827,10 +831,10 @@ def render(session: dict) -> str:
 
     legend = """
 <div class="legend">
-  <span><i class="dot new"></i> Verde = criar arquivo novo</span>
-  <span><i class="dot append"></i> Âmbar = acrescer só o novo</span>
-  <span><i class="dot block"></i> Vermelho = não reescrever</span>
-  <span><i class="dot ok"></i> Neutro = já igual</span>
+  <span><i class="dot new"></i> criar / colocar</span>
+  <span><i class="dot append"></i> acrescer no principal</span>
+  <span><i class="dot block"></i> não reescrever</span>
+  <span><i class="dot ok"></i> já igual</span>
 </div>
 """ if add_only else ""
 
@@ -842,99 +846,122 @@ def render(session: dict) -> str:
 <title>DBT Guardian — {card}</title>
 <style>
 :root {{
-  --bg0:#f3f1eb;
-  --bg1:#e7eef2;
-  --ink:#1c2430;
-  --muted:#5c6b7a;
-  --panel:#fffcf7;
-  --line:#d5dde6;
-  --new:#1f7a4d;
-  --new-bg:#e5f5ec;
+  --bg0:#e8eef4;
+  --bg1:#dce5ee;
+  --ink:#0b1220;
+  --muted:#5a6a7a;
+  --panel:#f7fafc;
+  --line:#c5d0dc;
+  --new:#0f766e;
+  --new-bg:#ccfbf1;
   --block:#b42318;
   --block-bg:#fdecea;
   --warn:#9a6700;
   --warn-bg:#fff6e0;
-  --ok:#3d6b5a;
-  --ok-bg:#eef6f2;
-  --info:#3d5a80;
-  --focus:#2f6fed;
-  --shadow:0 10px 30px rgba(28,36,48,.06);
+  --ok:#0f766e;
+  --ok-bg:#ecfdf8;
+  --info:#0369a1;
+  --focus:#0284c7;
+  --shadow:0 8px 28px rgba(11,18,32,.08);
+  --mono: "Cascadia Code", Consolas, "Courier New", monospace;
 }}
 * {{ box-sizing:border-box; }}
 body {{
   margin:0;
-  font-family: Candara, "Segoe UI", "Trebuchet MS", sans-serif;
+  font-family: "Segoe UI", "Trebuchet MS", Candara, sans-serif;
   color:var(--ink);
   background:
-    radial-gradient(900px 420px at 8% -10%, #d9ebe3 0%, transparent 55%),
-    radial-gradient(700px 380px at 100% 0%, #d5e4f2 0%, transparent 50%),
+    linear-gradient(180deg, rgba(15,118,110,.06), transparent 28%),
+    repeating-linear-gradient(90deg, transparent, transparent 47px, rgba(11,18,32,.03) 48px),
     linear-gradient(180deg, var(--bg0), var(--bg1));
   min-height:100vh;
-  font-size:17px;
-  line-height:1.55;
+  font-size:16px;
+  line-height:1.5;
+  letter-spacing:.01em;
 }}
 header.app {{
-  padding:1.6rem 1.6rem 1.2rem;
+  padding:1.35rem 1.6rem 1.1rem;
   border-bottom:1px solid var(--line);
-  background:rgba(255,252,247,.82);
-  backdrop-filter:blur(8px);
+  background:rgba(247,250,252,.92);
+  backdrop-filter:blur(10px);
 }}
 header.app h1 {{
   margin:0;
-  font-family: "Palatino Linotype", "Book Antiqua", Georgia, serif;
-  font-size:clamp(1.8rem, 3vw, 2.4rem);
-  letter-spacing:-.02em;
+  font-family: var(--mono);
+  font-size:clamp(1.35rem, 2.4vw, 1.85rem);
+  letter-spacing:-.03em;
   font-weight:700;
 }}
-header.app .sub {{ color:var(--muted); margin-top:.35rem; }}
+header.app .brand-mark {{
+  display:inline-block; width:.55rem; height:.55rem; border-radius:2px;
+  background:var(--new); margin-right:.45rem; vertical-align:middle;
+}}
+header.app .sub {{ color:var(--muted); margin-top:.35rem; font-size:.95rem; }}
+header.app .pitch {{
+  margin-top:.55rem; font-family:var(--mono); font-size:.88rem;
+  color:var(--new); font-weight:700;
+}}
 .progress {{
-  margin-top:1rem; background:#e8edf2; border-radius:999px; height:10px; overflow:hidden;
+  margin-top:1rem; background:#d8e0e8; border-radius:999px; height:8px; overflow:hidden;
 }}
 .progress > span {{
   display:block; height:100%;
-  background:linear-gradient(90deg, var(--new), #3daa6d);
+  background:linear-gradient(90deg, var(--new), #14b8a6);
   width:{pct}%; transition:width .35s ease;
 }}
 .legend {{
   display:flex; flex-wrap:wrap; gap:.85rem 1.4rem;
-  margin-top:.9rem; color:var(--muted); font-size:.92rem;
+  margin-top:.9rem; color:var(--muted); font-size:.88rem;
+  font-family:var(--mono);
 }}
 .dot {{
-  display:inline-block; width:.7rem; height:.7rem; border-radius:50%;
+  display:inline-block; width:.65rem; height:.65rem; border-radius:2px;
   margin-right:.35rem; vertical-align:middle;
 }}
 .dot.new {{ background:var(--new); }}
 .dot.block {{ background:var(--block); }}
 .dot.ok {{ background:var(--ok); }}
+.dot.append {{ background:#b45309; }}
 .msg {{
-  margin:1rem 1.5rem 0; padding:1rem 1.15rem; border-radius:14px;
+  margin:1rem 1.5rem 0; padding:1rem 1.15rem; border-radius:12px;
   background:var(--panel); border:1px solid var(--line);
-  box-shadow:var(--shadow); border-left:5px solid var(--focus);
+  box-shadow:var(--shadow); border-left:4px solid var(--focus);
+  font-family:var(--mono); font-size:.9rem;
 }}
 .gold-rule {{
-  background:linear-gradient(135deg, #e8f6ee, #f7faf8);
-  border:1px solid #b7dbc8; border-radius:16px;
+  background:linear-gradient(135deg, #ecfdf8, #f7fafc);
+  border:1px solid #99f6e4; border-radius:12px;
   padding:1rem 1.2rem; margin-bottom:1.1rem;
 }}
 .gold-rule p {{ margin:.35rem 0 0; color:var(--muted); }}
 .tag {{
-  display:inline-block; padding:.05rem .45rem; border-radius:6px;
-  font-weight:700; font-size:.85em;
+  display:inline-block; padding:.05rem .45rem; border-radius:4px;
+  font-weight:700; font-size:.85em; font-family:var(--mono);
 }}
 .tag.new {{ background:var(--new-bg); color:var(--new); }}
 .tag.block {{ background:var(--block-bg); color:var(--block); }}
-.tabs {{ display:flex; gap:.5rem; padding:1rem 1.5rem 0; flex-wrap:wrap; }}
+.tag.append {{ background:#fff7ed; color:#c2410c; }}
+.tabs {{ display:flex; gap:.4rem; padding:1rem 1.5rem 0; flex-wrap:wrap; }}
 .tabs label {{
-  padding:.6rem 1.05rem; border-radius:12px; background:var(--panel);
+  padding:.55rem .95rem; border-radius:8px; background:var(--panel);
   border:1px solid var(--line); cursor:pointer; color:var(--muted); user-select:none;
-  box-shadow:var(--shadow);
+  box-shadow:var(--shadow); font-family:var(--mono); font-size:.82rem; font-weight:600;
+  letter-spacing:.02em; text-transform:uppercase;
 }}
 .tabs input {{ display:none; }}
-.tabs input:checked + label {{
-  color:var(--ink); border-color:var(--new); background:var(--new-bg); font-weight:700;
-}}
 .panel {{ display:none; padding:1.25rem 1.5rem 3rem; }}
 #t1:checked ~ .p1, #t2:checked ~ .p2, #t3:checked ~ .p3, #t4:checked ~ .p4, #t5:checked ~ .p5, #t6:checked ~ .p6 {{ display:block; }}
+#t1:checked ~ nav.tabs label[for="t1"],
+#t2:checked ~ nav.tabs label[for="t2"],
+#t3:checked ~ nav.tabs label[for="t3"],
+#t4:checked ~ nav.tabs label[for="t4"],
+#t5:checked ~ nav.tabs label[for="t5"],
+#t6:checked ~ nav.tabs label[for="t6"] {{
+  color:#fff; border-color:var(--ink); background:var(--ink); font-weight:700;
+}}
+#t2:checked ~ nav.tabs label[for="t2"] {{
+  background:var(--new); border-color:var(--new); color:#fff;
+}}
 .grid {{ display:grid; gap:1rem; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); }}
 .card {{
   background:var(--panel); border:1px solid var(--line); border-radius:16px;
@@ -1235,15 +1262,43 @@ footer {{
   word-break:break-word; margin:.55rem 0 0.85rem;
 }}
 .ln-panel-empty {{ color:var(--muted); }}
+.pipeline {{
+  margin:1rem 1.5rem 0; padding:.9rem 1.1rem; border-radius:10px;
+  background:var(--panel); border:1px solid var(--line);
+  display:flex; flex-wrap:wrap; gap:.35rem .55rem; align-items:center;
+  font-family:var(--mono); font-size:.8rem; box-shadow:var(--shadow);
+}}
+.pipeline .pipe-step {{
+  padding:.25rem .55rem; border-radius:4px; background:#eef2f6; color:var(--muted); font-weight:700;
+}}
+.pipeline .pipe-step.on {{
+  background:var(--new-bg); color:var(--new);
+}}
+.pipeline .pipe-arrow {{ color:var(--line); font-weight:700; }}
+.btn-go-order {{
+  display:inline-block; cursor:pointer; font-weight:700; font-size:.85rem;
+  padding:.5rem .95rem; border-radius:6px; border:1px solid var(--new);
+  background:var(--new); color:#fff; text-decoration:none; font-family:var(--mono);
+  text-transform:uppercase; letter-spacing:.03em;
+}}
+.btn-go-order:hover {{ filter:brightness(1.06); }}
+.btn-go-order.ghost {{
+  background:transparent; color:var(--new);
+}}
+.journey-cta {{ margin:.85rem 0 1.1rem; display:flex; flex-wrap:wrap; gap:.5rem; }}
+nav.tabs label[for="t2"] {{
+  border-color:#99f6e4;
+}}
 </style>
 </head>
 <body>
 <header class="app">
-  <h1>DBT Guardian</h1>
+  <h1><span class="brand-mark"></span>DBT Sentinel</h1>
+  <div class="pitch">diff card × base · só o que falta colocar · base read-only</div>
   <div class="sub">Card <strong>{card}</strong> · {_esc(session.get('timestamp',''))}</div>
-  <div class="sub" style="margin-top:.35rem">
-    Base: <code>{_esc(session.get('base_path',''))}</code>
-    {(" · Negócios: " + _esc(", ".join(session.get("domains_scanned") or []))) if session.get("domains_scanned") else ""}
+  <div class="sub" style="margin-top:.25rem">
+    Base <code>{_esc(session.get('base_path',''))}</code>
+    {(" · " + _esc(", ".join(session.get("domains_scanned") or []))) if session.get("domains_scanned") else ""}
   </div>
   <div class="progress" title="Referência visual"><span></span></div>
   {legend}
@@ -1251,79 +1306,89 @@ footer {{
     <div class="stat hl-new">Criar: <b>{s.get('novo', 0)}</b></div>
     <div class="stat hl-append">Acrescentar: <b>{s.get('acrescentar', 0)}</b></div>
     <div class="stat hl-block">Não alterar: <b>{s.get('nao_alterar', 0)}</b></div>
-    <div class="stat">Revisar: <b>{s.get('revisar', 0)}</b></div>
-    <div class="stat">Já na base: <b>{s.get('igual', 0)}</b></div>
     <div class="stat">Bloqueios: <b>{s.get('critical', 0)}</b></div>
-    <div class="stat">Pendentes: <b>{s.get('pending', 0)}</b></div>
   </div>
 </header>
 
 {"<div class='msg'>" + _esc(msg) + "</div>" if msg else ""}
 
-<details class="help" open>
-  <summary>Como usar (1 minuto)</summary>
+<div class="pipeline">
+  <span class="pipe-step">1 Card Jira</span>
+  <span class="pipe-arrow">→</span>
+  <span class="pipe-step on">2 Diff (existe × colocar)</span>
+  <span class="pipe-arrow">→</span>
+  <span class="pipe-step on">3 Aplicar na ordem</span>
+  <span class="pipe-arrow">→</span>
+  <span class="pipe-step">4 dbt / SaaS / BQ</span>
+  <label for="t2" class="btn-go-order" style="margin-left:auto">Abrir Diff</label>
+</div>
+
+<details class="help">
+  <summary>Seu fluxo</summary>
   <ol>
-    <li><strong>Criar</strong> = arquivo que ainda não existe.</li>
-    <li><strong>Acrescentar</strong> = arquivo já existe; coloque só os itens NOVOS do card (não reescreva o resto).</li>
-    <li>Abra a aba <strong>Ordem</strong> e execute os passos na sequência.</li>
-    <li>No <strong>Lineage</strong> (micro): veja o card inteiro — quem alimenta quem.</li>
-    <li>No <strong>Macro</strong>: zoom num arquivo e onde ele se encaixa na base (verde = novo).</li>
-    <li>Valide SaaS + BigQuery → no terminal digite <strong>S</strong>.</li>
+    <li>Recebe o card no Jira e extrai o ZIP no <code>workspace/</code>.</li>
+    <li>Abra <strong>Diff</strong>: no arquivo principal, veja o que <em>já existe</em> e o que <em>precisa colocar</em>.</li>
+    <li>Em <strong>Ordem</strong>, copie o snippet e acrescente só as diferenças (não reescreva o arquivo).</li>
+    <li>Rode no dbt / valide SaaS + BQ. No terminal: <strong>S</strong> para fechar o card.</li>
   </ol>
 </details>
 
-<input type="radio" name="tab" id="t1" checked>
-<input type="radio" name="tab" id="t2">
+<input type="radio" name="tab" id="t1">
+<input type="radio" name="tab" id="t2" checked>
 <input type="radio" name="tab" id="t3">
 <input type="radio" name="tab" id="t4">
 <input type="radio" name="tab" id="t5">
 <input type="radio" name="tab" id="t6">
 <nav class="tabs">
-  <label for="t1">Assistente</label>
-  <label for="t2">Ordem</label>
-  <label for="t3">Arquivos</label>
-  <label for="t4">Lineage</label>
-  <label for="t5">Macro</label>
-  <label for="t6">Alertas</label>
+  <label for="t1">Resumo</label>
+  <label for="t2">Diff</label>
+  <label for="t3">Ordem</label>
+  <label for="t4">Fluxo</label>
+  <label for="t5">Zoom</label>
+  <label for="t6">Avisos{(" " + str(len(session.get("warnings") or []))) if session.get("warnings") else ""}</label>
 </nav>
 
 <section class="panel p1">
-  <h2>O que fazer agora</h2>
+  <h2>Resumo do card</h2>
   {_wizard(session)}
 </section>
 
 <section class="panel p2">
-  <h2>Executar nesta ordem</h2>
-  {_ordem(session)}
-</section>
-
-<section class="panel p3">
-  <h2>Checklist de arquivos</h2>
-  <p class="hint">Separado em: Criar → Acrescentar → Atenção/Revisar.</p>
+  <h2>Diff — o que existe × o que colocar</h2>
+  <p class="hint">
+    Compare com o arquivo principal da base: <strong>já existe</strong> vs <strong>acrescentar</strong>.
+    Não reescreva o SQL antigo — só as diferenças do card.
+  </p>
   {_cards(session['checklist'], add_only)}
   {_igual_section(session['checklist'])}
 </section>
 
+<section class="panel p3">
+  <h2>Ordem de aplicação</h2>
+  <p class="hint">Depois do Diff: copie o roteiro/snippet e aplique nesta sequência. Em seguida rode o dbt.</p>
+  {_ordem(session)}
+</section>
+
 <section class="panel p4">
-  <h2>Lineage <span class="pill">micro</span></h2>
-  <p class="hint">Visão do card: ← depende de · → alimenta · clique no nó para o caminho.</p>
+  <h2>Fluxo do card</h2>
+  <p class="hint">Dependências deste pacote. Clique → Zoom no arquivo.</p>
   {_flow(session)}
 </section>
 
 <section class="panel p5">
-  <h2>Macro <span class="pill">arquivo × base</span></h2>
-  <p class="hint">Zoom num arquivo: grafo corporativo ao redor · verde = o que o card adiciona.</p>
+  <h2>Zoom — arquivo na base</h2>
+  <p class="hint">Um arquivo no centro: o que já está na base, o que o card adiciona, o que recompilar depois.</p>
   {_macro(session)}
 </section>
 
 <section class="panel p6">
-  <h2>Alertas</h2>
-  <p class="hint">Taxonomia, acrescento e avisos de política.</p>
+  <h2>Avisos</h2>
+  <p class="hint">Bloqueios, taxonomia e política — só se precisar.</p>
   {_alerts(session)}
 </section>
 
 <footer>
-  DBT Guardian · somente leitura no repositório DBT · política padrão: só adicionar o novo · stdlib
+  DBT Sentinel · base somente leitura · só adições · stdlib
 </footer>
 
 <script>
@@ -1364,7 +1429,7 @@ function openMacro(id) {{
 function openLineage(id) {{
   openTab("t4");
   setTimeout(() => {{
-    const btn = document.querySelector('.ln-board .ln-node[data-node="' + id.replace(/"/g, '') + '"]');
+    const btn = document.querySelector('#ln-board .ln-node[data-node="' + id.replace(/"/g, '') + '"]');
     if (btn) {{
       btn.click();
       btn.scrollIntoView({{ behavior: "smooth", block: "center" }});
@@ -1566,7 +1631,7 @@ document.addEventListener("click", (ev) => {{
     const macFocuses = ((S.macro || {{}}).focuses || []).map(f => f.id);
     const jumpMacro = macFocuses.indexOf(id) >= 0
       ? "<p class='jump-row'><button type='button' class='jump-link' data-open-macro='" +
-        esc(id) + "'>Abrir Macro</button></p>"
+        esc(id) + "'>Abrir zoom do arquivo</button></p>"
       : "";
 
     panel.innerHTML =

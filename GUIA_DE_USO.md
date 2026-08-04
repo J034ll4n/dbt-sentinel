@@ -28,11 +28,11 @@ No `config.json`:
 ## Em 30 segundos
 
 1. Configure `base_project_path` + `card_id` (e `base_include` se quiser filtrar)
-2. Extraia o ZIP em `workspace/` (ou aponte `workspace_path` para a pasta do card)
+2. Extraia o ZIP em `workspace/`
 3. `py -3 main.py`
-4. Abra `output/index.html`
-5. **Verde = criar** (só o novo). **Vermelho = não mexer** (já existe na base)
-6. SaaS + BQ → `S` no terminal → limpe `workspace/`
+4. Abra `output/index.html` → aba **Diff** (existe × colocar)
+5. **Ordem** → copie o snippet e acrescente só as diferenças
+6. Rode o dbt / SaaS + BQ → `S` no terminal → limpe `workspace/`
 
 ### Regra de ouro
 

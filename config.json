@@ -1,12 +1,10 @@
 ﻿{
-  "base_project_path": "demo_base",
-  "base_include": [
-    "ebody"
-  ],
+  "base_project_path": "C:\\caminho\\para\\dbt\\corporativo",
+  "base_include": [],
   "workspace_path": "workspace",
   "output_path": "output",
   "snapshots_path": "snapshots",
-  "card_id": "6691-DEMO",
+  "card_id": "CARD-XXX",
   "detect_removed": false,
   "match_threshold": 0.62,
   "aliases": {},

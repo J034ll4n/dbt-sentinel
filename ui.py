@@ -10,6 +10,52 @@ def _esc(s) -> str:
     return H.escape("" if s is None else str(s))
 
 
+def _snippet_box(snippet: dict | None, sid: str) -> str:
+    """Bloco copiável: só adições / guia de criar."""
+    if not snippet or not snippet.get("text"):
+        return ""
+    label = _esc(snippet.get("label") or "Snippet")
+    text = _esc(snippet.get("text") or "")
+    place = snippet.get("place") or []
+    exists = snippet.get("exists") or []
+    attention = snippet.get("attention") or []
+    meta = ""
+    if place or exists or attention:
+        bits = []
+        if place:
+            bits.append(
+                "<span class=\"snip-meta\"><b>Colocar:</b> "
+                + ", ".join(f"<code>{_esc(x)}</code>" for x in place[:10])
+                + ("…" if len(place) > 10 else "")
+                + "</span>"
+            )
+        if exists:
+            bits.append(
+                "<span class=\"snip-meta muted\"><b>Já na base:</b> "
+                + ", ".join(f"<code>{_esc(x)}</code>" for x in exists[:8])
+                + ("…" if len(exists) > 8 else "")
+                + "</span>"
+            )
+        if attention:
+            bits.append(
+                "<span class=\"snip-meta warn\"><b>Atenção:</b> "
+                + _esc(attention[0][:80])
+                + ("…" if len(attention) > 1 or len(attention[0]) > 80 else "")
+                + "</span>"
+            )
+        meta = "<div class=\"snip-metas\">" + "".join(bits) + "</div>"
+    return f"""
+<div class="snippet-box" data-snippet-id="{_esc(sid)}">
+  <div class="snippet-head">
+    <span class="snippet-label">{label}</span>
+    <button type="button" class="btn-copy" data-copy-target="snip-{_esc(sid)}">Copiar</button>
+  </div>
+  {meta}
+  <textarea class="snippet-text" id="snip-{_esc(sid)}" readonly rows="6">{text}</textarea>
+</div>
+"""
+
+
 def _badge(status: str, add_only: bool = True, policy_action: str | None = None) -> str:
     action = policy_action or ""
     if add_only and action:
@@ -202,6 +248,7 @@ def _one_card(c: dict, add_only: bool = True) -> str:
      · <strong>Ordem:</strong> {_esc(c.get('suggested_order', '—'))}</p>
   {up}
   {impact}
+  {_snippet_box(c.get("snippet"), c["name"])}
   {check_html}
 </article>
 """
@@ -342,6 +389,12 @@ def _ordem(session: dict) -> str:
             + "</p>"
         )
         target = c.get("match_name") or c["name"]
+        snip = _snippet_box(c.get("snippet"), f"ordem-{c['name']}")
+        jump = (
+            f'<p class="jump-row">'
+            f'<button type="button" class="jump-link" data-open-macro="{_esc(c["name"])}">'
+            f"Abrir Macro</button></p>"
+        )
         steps.append(
             f"""
 <article class="order-step action-{_esc(action)}">
@@ -355,15 +408,30 @@ def _ordem(session: dict) -> str:
      · <strong>Itens:</strong> +{n}</p>
   {dep_html}
   {item_lis}
+  {snip}
+  {jump}
   <label class="check">
     <input type="checkbox" data-item="ordem::{_esc(c['name'])}"> Feito este passo
   </label>
 </article>
 """
         )
+    md = session.get("order_markdown") or ""
+    roteiro = f"""
+<div class="roteiro-box">
+  <div class="snippet-head">
+    <span class="snippet-label">Roteiro Markdown (Jira / VS Code)</span>
+    <button type="button" class="btn-copy" data-copy-target="roteiro-md">Copiar roteiro</button>
+  </div>
+  <textarea class="snippet-text" id="roteiro-md" readonly rows="8">{_esc(md)}</textarea>
+  <p class="hint">Também gravado em <code>output/roteiro.md</code>.</p>
+</div>
+"""
     return (
-        '<p class="guide">Execute <strong>nesta ordem</strong> (dependências primeiro). '
-        "Verde = criar arquivo · Âmbar = acrescer só o novo no arquivo que já existe.</p>"
+        roteiro
+        + '<p class="guide">Execute <strong>nesta ordem</strong> (dependências primeiro). '
+        "Verde = criar arquivo · Âmbar = acrescer só o novo no arquivo que já existe. "
+        "Use <strong>Copiar</strong> nos snippets — só adições, nunca reescreva o principal.</p>"
         + "\n".join(steps)
     )
 
@@ -636,6 +704,63 @@ def _flow(session: dict) -> str:
 """
 
 
+def _macro(session: dict) -> str:
+    """Visão MACRO: um arquivo no grafo corporativo (verde = o que o card adiciona)."""
+    mac = session.get("macro") or {}
+    focuses = mac.get("focuses") or []
+    if not focuses:
+        return (
+            "<p class=\"empty\">Nenhum arquivo criar/acrescentar neste card — "
+            "a visão macro aparece quando há algo novo a encaixar na base.</p>"
+        )
+
+    opts = []
+    for f in focuses:
+        mode = "Criar" if f.get("mode") == "create" else "Acrescentar"
+        addn = f"+{f['add_count']}" if f.get("add_count") else ""
+        opts.append(
+            f'<option value="{_esc(f["id"])}">{_esc(f["label"])} — {mode} {addn}</option>'
+        )
+
+    return f"""
+<div class="macro-wrap">
+  <div class="macro-toolbar">
+    <label class="macro-pick">Arquivo foco
+      <select id="macro-focus">{''.join(opts)}</select>
+    </label>
+    <div class="ln-legend">
+      <span><i class="dot exist"></i> Cinza — já na base (contexto)</span>
+      <span><i class="dot new"></i> Verde — criar / itens novos do card</span>
+      <span><i class="dot append"></i> Contorno verde — acrescer neste arquivo</span>
+    </div>
+  </div>
+  <p class="guide" id="macro-subtitle">
+    Escolha um arquivo: veja onde ele se encaixa no grafo corporativo.
+    <strong>Micro</strong> (aba Lineage) = o card inteiro ·
+    <strong>Macro</strong> = um arquivo + vizinhos da base.
+  </p>
+  <p class="impact-line" id="macro-recompile" hidden></p>
+  <div class="macro-addbar" id="macro-addbar" hidden></div>
+  <div id="macro-snippet"></div>
+  <p class="jump-row">
+    <button type="button" class="jump-link" id="macro-to-lineage">Ver no Lineage</button>
+  </p>
+  <div class="lineage-grid">
+    <div class="ln-board-wrap" id="macro-board-wrap">
+      <svg class="ln-svg" id="macro-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div class="ln-board" id="macro-board"></div>
+    </div>
+    <aside class="ln-panel" id="macro-panel" aria-live="polite">
+      <div class="ln-panel-empty">
+        <h3>Detalhe macro</h3>
+        <p>Selecione um nó para ver o encaixe no grafo e o que será adicionado.</p>
+      </div>
+    </aside>
+  </div>
+</div>
+"""
+
+
 def _alerts(session: dict) -> str:
     warnings = session.get("warnings") or []
     if not warnings:
@@ -809,7 +934,7 @@ header.app .sub {{ color:var(--muted); margin-top:.35rem; }}
   color:var(--ink); border-color:var(--new); background:var(--new-bg); font-weight:700;
 }}
 .panel {{ display:none; padding:1.25rem 1.5rem 3rem; }}
-#t1:checked ~ .p1, #t2:checked ~ .p2, #t3:checked ~ .p3, #t4:checked ~ .p4, #t5:checked ~ .p5 {{ display:block; }}
+#t1:checked ~ .p1, #t2:checked ~ .p2, #t3:checked ~ .p3, #t4:checked ~ .p4, #t5:checked ~ .p5, #t6:checked ~ .p6 {{ display:block; }}
 .grid {{ display:grid; gap:1rem; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); }}
 .card {{
   background:var(--panel); border:1px solid var(--line); border-radius:16px;
@@ -967,6 +1092,74 @@ footer {{
   font-size:.7rem; font-weight:800; padding:.1rem .4rem; border-radius:999px;
   background:#e7f0ff; color:#274c77;
 }}
+.macro-toolbar {{
+  display:flex; flex-wrap:wrap; gap:.85rem 1.25rem; align-items:flex-end;
+  margin-bottom:.65rem;
+}}
+.macro-pick {{
+  display:flex; flex-direction:column; gap:.35rem; font-weight:700; font-size:.9rem;
+}}
+.macro-pick select {{
+  font:inherit; padding:.45rem .7rem; border-radius:10px; border:1px solid var(--line);
+  min-width:min(100%, 320px); background:var(--panel);
+}}
+.macro-addbar {{
+  margin:.35rem 0 .85rem; padding:.65rem .9rem; border-radius:12px;
+  background:#e5f5ec; border:1px solid #9dceb3; font-size:.92rem;
+}}
+.macro-addbar code {{ font-size:.88em; }}
+.ln-node.vis-add {{
+  background:linear-gradient(180deg, #f3f6f8, #eef2f5);
+  border:2px solid #1f7a4d;
+  box-shadow:0 0 0 3px rgba(31,122,77,.12);
+}}
+.ln-node.macro-focus {{
+  outline:2px solid var(--focus); outline-offset:2px;
+}}
+.ln-svg path.edge.kind-new {{
+  stroke:#1f7a4d; stroke-width:2.5; opacity:.95;
+}}
+.pill {{
+  display:inline-block; font-size:.72rem; font-weight:800; padding:.12rem .45rem;
+  border-radius:999px; background:#e8edf2; color:var(--muted); vertical-align:middle;
+}}
+.snippet-box, .roteiro-box {{
+  margin:.75rem 0 1rem; padding:.75rem .85rem; border-radius:14px;
+  background:linear-gradient(180deg, #f3faf6, #fffcf7);
+  border:1px solid #b7dbc8; box-shadow:var(--shadow);
+}}
+.snippet-head {{
+  display:flex; align-items:center; justify-content:space-between; gap:.75rem;
+  margin-bottom:.45rem;
+}}
+.snippet-label {{ font-weight:800; color:var(--new); font-size:.9rem; }}
+.btn-copy {{
+  font:inherit; font-weight:700; font-size:.85rem; cursor:pointer;
+  padding:.35rem .75rem; border-radius:999px; border:1px solid #7cbc9a;
+  background:#dff3e8; color:#1f7a4d;
+}}
+.btn-copy:hover {{ background:#cfead9; }}
+.btn-copy.copied {{ background:#1f7a4d; color:#fff; border-color:#1f7a4d; }}
+.snippet-text {{
+  width:100%; min-height:7rem; resize:vertical; font-family:Consolas, "Courier New", monospace;
+  font-size:.82rem; line-height:1.45; padding:.65rem .7rem; border-radius:10px;
+  border:1px solid #c5d9cc; background:#fff; color:var(--ink);
+}}
+.snip-metas {{ display:flex; flex-direction:column; gap:.25rem; margin-bottom:.5rem; font-size:.85rem; }}
+.snip-meta.muted {{ color:var(--muted); }}
+.snip-meta.warn {{ color:#9a6700; }}
+.impact-line {{
+  margin:.35rem 0 .75rem; padding:.65rem .9rem; border-radius:12px;
+  background:#eef3f8; border:1px solid #c5d0db; font-size:.92rem;
+}}
+.impact-line code {{ font-size:.88em; }}
+.jump-row {{ margin:.5rem 0; }}
+.jump-link {{
+  font:inherit; font-weight:700; font-size:.85rem; cursor:pointer;
+  padding:.35rem .8rem; border-radius:999px; border:1px solid var(--line);
+  background:var(--panel); color:var(--focus);
+}}
+.jump-link:hover {{ border-color:var(--focus); background:#eef3ff; }}
 .ln-deps {{
   display:block; font-size:.68rem; color:var(--muted); margin-bottom:.25rem;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%;
@@ -1073,7 +1266,8 @@ footer {{
     <li><strong>Criar</strong> = arquivo que ainda não existe.</li>
     <li><strong>Acrescentar</strong> = arquivo já existe; coloque só os itens NOVOS do card (não reescreva o resto).</li>
     <li>Abra a aba <strong>Ordem</strong> e execute os passos na sequência.</li>
-    <li>No <strong>Lineage</strong>, veja quem alimenta quem (A → B).</li>
+    <li>No <strong>Lineage</strong> (micro): veja o card inteiro — quem alimenta quem.</li>
+    <li>No <strong>Macro</strong>: zoom num arquivo e onde ele se encaixa na base (verde = novo).</li>
     <li>Valide SaaS + BigQuery → no terminal digite <strong>S</strong>.</li>
   </ol>
 </details>
@@ -1083,12 +1277,14 @@ footer {{
 <input type="radio" name="tab" id="t3">
 <input type="radio" name="tab" id="t4">
 <input type="radio" name="tab" id="t5">
+<input type="radio" name="tab" id="t6">
 <nav class="tabs">
   <label for="t1">Assistente</label>
   <label for="t2">Ordem</label>
   <label for="t3">Arquivos</label>
   <label for="t4">Lineage</label>
-  <label for="t5">Alertas</label>
+  <label for="t5">Macro</label>
+  <label for="t6">Alertas</label>
 </nav>
 
 <section class="panel p1">
@@ -1109,12 +1305,18 @@ footer {{
 </section>
 
 <section class="panel p4">
-  <h2>Lineage</h2>
-  <p class="hint">← depende de · → alimenta · clique no nó para o caminho completo.</p>
+  <h2>Lineage <span class="pill">micro</span></h2>
+  <p class="hint">Visão do card: ← depende de · → alimenta · clique no nó para o caminho.</p>
   {_flow(session)}
 </section>
 
 <section class="panel p5">
+  <h2>Macro <span class="pill">arquivo × base</span></h2>
+  <p class="hint">Zoom num arquivo: grafo corporativo ao redor · verde = o que o card adiciona.</p>
+  {_macro(session)}
+</section>
+
+<section class="panel p6">
   <h2>Alertas</h2>
   <p class="hint">Taxonomia, acrescento e avisos de política.</p>
   {_alerts(session)}
@@ -1142,6 +1344,68 @@ function save(st) {{ localStorage.setItem(KEY, JSON.stringify(st)); }}
     }});
   }});
 }})();
+
+function openTab(tid) {{
+  const el = document.getElementById(tid);
+  if (el) el.checked = true;
+}}
+function openMacro(id) {{
+  openTab("t5");
+  const sel = document.getElementById("macro-focus");
+  if (sel) {{
+    sel.value = id;
+    sel.dispatchEvent(new Event("change"));
+  }}
+  setTimeout(() => {{
+    const wrap = document.getElementById("macro-board-wrap");
+    if (wrap) wrap.scrollIntoView({{ behavior: "smooth", block: "start" }});
+  }}, 60);
+}}
+function openLineage(id) {{
+  openTab("t4");
+  setTimeout(() => {{
+    const btn = document.querySelector('.ln-board .ln-node[data-node="' + id.replace(/"/g, '') + '"]');
+    if (btn) {{
+      btn.click();
+      btn.scrollIntoView({{ behavior: "smooth", block: "center" }});
+    }}
+  }}, 80);
+}}
+document.addEventListener("click", (ev) => {{
+  const t = ev.target;
+  if (!(t instanceof Element)) return;
+  const copyBtn = t.closest(".btn-copy");
+  if (copyBtn) {{
+    const tid = copyBtn.getAttribute("data-copy-target");
+    const area = tid ? document.getElementById(tid) : null;
+    const text = area ? area.value : "";
+    const done = () => {{
+      copyBtn.classList.add("copied");
+      const old = copyBtn.textContent;
+      copyBtn.textContent = "Copiado";
+      setTimeout(() => {{ copyBtn.classList.remove("copied"); copyBtn.textContent = old; }}, 1200);
+    }};
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(text).then(done).catch(() => {{
+        if (area) {{ area.select(); document.execCommand("copy"); done(); }}
+      }});
+    }} else if (area) {{
+      area.select();
+      document.execCommand("copy");
+      done();
+    }}
+    return;
+  }}
+  const mac = t.closest("[data-open-macro]");
+  if (mac) {{
+    openMacro(mac.getAttribute("data-open-macro"));
+    return;
+  }}
+  const lin = t.closest("[data-open-lineage]");
+  if (lin) {{
+    openLineage(lin.getAttribute("data-open-lineage"));
+  }}
+}});
 
 (function lineageUI() {{
   const LIN = S.lineage || {{}};
@@ -1299,8 +1563,15 @@ function save(st) {{ localStorage.setItem(KEY, JSON.stringify(st)); }}
         " saídas:</strong> " + n.used_by.map(esc).join(", ") + "</p>"
       : "";
 
+    const macFocuses = ((S.macro || {{}}).focuses || []).map(f => f.id);
+    const jumpMacro = macFocuses.indexOf(id) >= 0
+      ? "<p class='jump-row'><button type='button' class='jump-link' data-open-macro='" +
+        esc(id) + "'>Abrir Macro</button></p>"
+      : "";
+
     panel.innerHTML =
       "<h3>" + esc(n.label || n.id) + "</h3>" +
+      jumpMacro +
       "<div class='kv'><b>Status:</b> " + esc(visLabel) + "</div>" +
       "<div class='kv'><b>Camada:</b> " + esc(n.layer || "—") +
         (n.table_kind ? " · <b>Tipo:</b> " + esc(n.table_kind) : "") + "</div>" +
@@ -1345,6 +1616,213 @@ function save(st) {{ localStorage.setItem(KEY, JSON.stringify(st)); }}
   if (firstNew) show(firstNew.id);
   else drawEdges();
   setTimeout(drawEdges, 100);
+}})();
+
+(function macroUI() {{
+  const MAC = S.macro || {{}};
+  const byFocus = MAC.by_focus || {{}};
+  const sel = document.getElementById("macro-focus");
+  const board = document.getElementById("macro-board");
+  const wrap = document.getElementById("macro-board-wrap");
+  const svg = document.getElementById("macro-svg");
+  const panel = document.getElementById("macro-panel");
+  const sub = document.getElementById("macro-subtitle");
+  const addbar = document.getElementById("macro-addbar");
+  const recompileEl = document.getElementById("macro-recompile");
+  const snipHost = document.getElementById("macro-snippet");
+  const toLin = document.getElementById("macro-to-lineage");
+  if (!sel || !board || !Object.keys(byFocus).length) return;
+
+  let view = null;
+  let activeId = null;
+
+  function esc(s) {{
+    return String(s == null ? "" : s)
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;");
+  }}
+
+  function elFor(id) {{
+    const safe = String(id).replace(/\\\\/g, "\\\\\\\\").replace(/"/g, '\\\\"');
+    return board.querySelector('.ln-node[data-node="' + safe + '"]');
+  }}
+
+  function renderItems(list) {{
+    if (!list || !list.length) return "<p class='empty'>Nenhum item novo neste nó.</p>";
+    return "<ul class='add-list'>" + list.map(it => {{
+      const typ = it.dbt_type ? " → <em>" + esc(it.dbt_type) + "</em>" : "";
+      return "<li><span class='chip'>" + esc(it.kind) + "</span> <code>" +
+        esc(it.name) + "</code>" + typ + "</li>";
+    }}).join("") + "</ul>";
+  }}
+
+  function drawEdges() {{
+    if (!svg || !wrap || !view) return;
+    const wr = wrap.getBoundingClientRect();
+    const bw = board.scrollWidth;
+    const bh = Math.max(board.scrollHeight, wrap.clientHeight);
+    svg.setAttribute("width", bw);
+    svg.setAttribute("height", bh);
+    svg.style.width = bw + "px";
+    svg.style.height = bh + "px";
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    (view.edges || []).forEach(e => {{
+      const a = elFor(e.from);
+      const b = elFor(e.to);
+      if (!a || !b) return;
+      const ra = a.getBoundingClientRect();
+      const rb = b.getBoundingClientRect();
+      const x1 = ra.right - wr.left + wrap.scrollLeft;
+      const y1 = ra.top + ra.height / 2 - wr.top + wrap.scrollTop;
+      const x2 = rb.left - wr.left + wrap.scrollLeft;
+      const y2 = rb.top + rb.height / 2 - wr.top + wrap.scrollTop;
+      const dx = Math.max(40, (x2 - x1) * 0.45);
+      const d = "M " + x1 + " " + y1 + " C " + (x1 + dx) + " " + y1 + ", " +
+        (x2 - dx) + " " + y2 + ", " + x2 + " " + y2;
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      path.setAttribute("class", "edge" + (e.kind === "new" ? " kind-new" : ""));
+      if (activeId && e.from !== activeId && e.to !== activeId) path.classList.add("dim");
+      else if (activeId) path.classList.add("hi");
+      svg.appendChild(path);
+    }});
+  }}
+
+  function showNode(id) {{
+    if (!view || !panel) return;
+    const n = (view.nodes || []).find(x => x.id === id);
+    if (!n) return;
+    activeId = id;
+    board.querySelectorAll(".ln-node").forEach(btn => {{
+      const bid = btn.getAttribute("data-node");
+      btn.classList.toggle("active", bid === id);
+      btn.classList.toggle("dim", bid !== id && bid !== view.focus);
+    }});
+    const modeLabel = n.visual === "new"
+      ? "Criar (arquivo novo)"
+      : (n.visual === "add"
+        ? "Acrescentar só o novo (já na base)"
+        : "Contexto corporativo");
+    panel.innerHTML =
+      "<h3>" + esc(n.label) + (n.focus ? " · foco" : "") + "</h3>" +
+      "<div class='kv'><b>Papel:</b> " + esc(modeLabel) + "</div>" +
+      "<div class='kv'><b>Origem:</b> " + esc(n.origin || "—") +
+        " · <b>Camada:</b> " + esc(n.layer || "—") + "</div>" +
+      "<p class='guide'>" + esc(n.hint || "") + "</p>" +
+      "<p><strong>Depende de (←)</strong></p>" +
+      "<div class='path-chain'>" +
+        ((n.depends_on && n.depends_on.length) ? n.depends_on.map(esc).join(" · ") : "—") +
+      "</div>" +
+      "<p><strong>Alimenta (→)</strong></p>" +
+      "<div class='path-chain'>" +
+        ((n.used_by && n.used_by.length) ? n.used_by.map(esc).join(" · ") : "—") +
+      "</div>" +
+      (n.visual === "add" || n.visual === "new"
+        ? ("<p><strong>O que o card adiciona (" + (n.add_count || 0) + ")</strong></p>" +
+           renderItems(n.add_items))
+        : "") +
+      ((n.base_columns && n.base_columns.length)
+        ? "<p><strong>Já na base</strong></p><p><code>" +
+          n.base_columns.map(esc).join("</code>, <code>") + "</code></p>"
+        : "");
+    requestAnimationFrame(drawEdges);
+  }}
+
+  function renderFocus(fid) {{
+    view = byFocus[fid];
+    if (!view) return;
+    activeId = view.focus;
+    if (sub) sub.textContent = view.subtitle || "";
+    if (recompileEl) {{
+      const rc = (view.recompile || []).filter(x => !String(x).startsWith("source."));
+      if (rc.length) {{
+        recompileEl.hidden = false;
+        recompileEl.innerHTML = "<strong>Se aplicar neste arquivo, recompilar depois:</strong> " +
+          rc.map(x => "<code>" + esc(x) + "</code>").join(" · ");
+      }} else {{
+        recompileEl.hidden = false;
+        recompileEl.innerHTML = "<strong>Recompilar depois:</strong> ninguém depende deste arquivo ainda.";
+      }}
+    }}
+    if (snipHost) {{
+      const sn = view.snippet;
+      if (sn && sn.text) {{
+        const sid = "macro-" + String(view.focus).replace(/[^\\w.-]/g, "_");
+        snipHost.innerHTML =
+          "<div class='snippet-box'>" +
+          "<div class='snippet-head'><span class='snippet-label'>" + esc(sn.label || "Snippet") +
+          "</span><button type='button' class='btn-copy' data-copy-target='" + sid +
+          "'>Copiar</button></div>" +
+          "<textarea class='snippet-text' id='" + sid + "' readonly rows='6'>" +
+          esc(sn.text) + "</textarea></div>";
+      }} else {{
+        snipHost.innerHTML = "";
+      }}
+    }}
+    if (toLin) {{
+      toLin.setAttribute("data-open-lineage", view.focus);
+      toLin.onclick = () => openLineage(view.focus);
+    }}
+    if (addbar) {{
+      const items = view.add_items || [];
+      if (items.length) {{
+        addbar.hidden = false;
+        addbar.innerHTML = "<strong>Verde neste foco:</strong> " +
+          items.slice(0, 12).map(it =>
+            "<code>" + esc(it.name) + "</code>").join(" · ") +
+          (items.length > 12 ? " …" : "");
+      }} else if (view.mode === "create") {{
+        addbar.hidden = false;
+        addbar.innerHTML = "<strong>Verde:</strong> o arquivo <code>" +
+          esc(view.focus) + "</code> inteiro será criado neste encaixe.";
+      }} else {{
+        addbar.hidden = true;
+        addbar.innerHTML = "";
+      }}
+    }}
+    const layers = view.layers || [];
+    const byLayer = {{}};
+    layers.forEach(L => {{ byLayer[L] = []; }});
+    (view.nodes || []).forEach(n => {{
+      const L = n.layer || "other";
+      if (!byLayer[L]) byLayer[L] = [];
+      byLayer[L].push(n);
+    }});
+    board.innerHTML = layers.map(L => {{
+      const cards = (byLayer[L] || []).map(n => {{
+        const kind = n.table_kind
+          ? "<span class='ln-kind'>" + esc(n.table_kind) + "</span>" : "";
+        const addn = n.add_count
+          ? "<span class='ln-add'>+" + n.add_count + "</span>" : "";
+        const foc = n.focus ? " macro-focus" : "";
+        return "<button type='button' class='ln-node vis-" + esc(n.visual) + foc +
+          "' data-node='" + esc(n.id) + "'>" +
+          "<span class='ln-name'>" + esc(n.label) + "</span>" +
+          "<span class='ln-meta'>" + kind + addn + "</span></button>";
+      }}).join("");
+      return "<div class='ln-lane' data-layer='" + esc(L) + "'>" +
+        "<h4>" + esc(L) + "</h4><div class='ln-nodes'>" + cards + "</div></div>";
+    }}).join("");
+
+    board.querySelectorAll(".ln-node").forEach(btn => {{
+      btn.addEventListener("click", () => showNode(btn.getAttribute("data-node")));
+    }});
+    showNode(view.focus);
+    setTimeout(drawEdges, 60);
+  }}
+
+  sel.addEventListener("change", () => renderFocus(sel.value));
+  if (wrap) wrap.addEventListener("scroll", () => drawEdges());
+  window.addEventListener("resize", () => drawEdges());
+  document.querySelectorAll("nav.tabs label").forEach(lab => {{
+    lab.addEventListener("click", () => setTimeout(drawEdges, 80));
+  }});
+
+  const initial = MAC.default || sel.value;
+  if (initial) {{
+    sel.value = initial;
+    renderFocus(initial);
+  }}
 }})();
 </script>
 </body>

@@ -88,12 +88,6 @@ py -3 run_demo.py
 
 Depois abra `output/index.html` para ver criar/acrescentar e o fan-out do lineage sem precisar de um repo corporativo.
 
-### Testes
-
-```bash
-py -3 tests.py
-```
-
 ---
 
 ## Configuração (visão geral)
@@ -175,7 +169,6 @@ Checklist operacional do dia a dia: [`GUIA_DE_USO.md`](GUIA_DE_USO.md).
 main.py          Entrada CLI, checagens de integridade, snapshot + verificação
 engine.py        Parse, matching, política, grafo, lineage, validate/verify
 ui.py            Gerador do relatório HTML/CSS/JS
-tests.py         Suite de testes (stdlib)
 config.json      Paths e flags de política
 run_demo.py      Gera o relatório contra demo_base/
 demo_base/       Árvore dbt de exemplo

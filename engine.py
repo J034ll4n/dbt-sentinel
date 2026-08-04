@@ -185,8 +185,10 @@ RE_JOIN = re.compile(r"\b((?:LEFT|RIGHT|INNER|FULL|CROSS)\s+JOIN|JOIN)\b", re.I)
 RE_CAST = re.compile(r"\b((?:SAFE_|TRY_)?CAST)\s*\(", re.I)
 RE_COMMENT_LINE = re.compile(r"--[^\n]*")
 RE_COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.S)
-RE_SELECT_COLS = re.compile(
-    r"(?:^|,)\s*(?:[\w.]+\.)?(\w+)\s*(?:,|$)",
+# Preferir alias: ... AS nome  |  fallback: table.col ou col no fim do item
+RE_SELECT_ALIAS = re.compile(r"\bas\s+([A-Za-z_][\w]*)\s*(?=,|$)", re.I)
+RE_SELECT_BARE = re.compile(
+    r"(?:^|,)\s*(?:[\w.]+\.)?([A-Za-z_][\w]*)\s*(?:,|$)",
     re.M,
 )
 
@@ -612,6 +614,62 @@ def load_project(root: str, include: list[str] | None = None) -> dict[str, dict]
     return models
 
 
+def _split_select_items(chunk: str) -> list[str]:
+    """Divide o SELECT em itens respeitando parênteses (CAST, funções)."""
+    items = []
+    buf: list[str] = []
+    depth = 0
+    for ch in chunk:
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif ch == "," and depth == 0:
+            part = "".join(buf).strip()
+            if part:
+                items.append(part)
+            buf = []
+        else:
+            buf.append(ch)
+    part = "".join(buf).strip()
+    if part:
+        items.append(part)
+    return items
+
+
+def extract_select_columns(chunk: str) -> list[str]:
+    """Nomes de coluna do SELECT: prioriza AS alias; senão último identificador."""
+    skip = {"as", "on", "and", "or", "case", "when", "then", "else", "end", "distinct", "select"}
+    cols: list[str] = []
+    for item in _split_select_items(chunk):
+        # remove newlines excessivos
+        flat = re.sub(r"\s+", " ", item).strip()
+        if not flat:
+            continue
+        am = RE_SELECT_ALIAS.search(flat)
+        if am:
+            name = am.group(1).lower()
+            if name not in skip:
+                cols.append(name)
+            continue
+        # sem AS: pega identificador simples (table.col → col)
+        bm = re.search(r"(?:[\w]+\.)?([A-Za-z_][\w]*)\s*$", flat)
+        if bm:
+            name = bm.group(1).lower()
+            if name not in skip:
+                cols.append(name)
+    # dedupe preservando ordem
+    seen = set()
+    out = []
+    for c in cols:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out[:40]
+
+
 def parse_sql(text: str) -> dict:
     clean = _strip_comments(text)
     refs = sorted(set(RE_REF.findall(clean)))
@@ -621,10 +679,7 @@ def parse_sql(text: str) -> dict:
     cols = []
     m = re.search(r"\bselect\b(.*?)\bfrom\b", clean, re.I | re.S)
     if m:
-        chunk = m.group(1)
-        for c in RE_SELECT_COLS.findall(chunk):
-            if c.lower() not in {"as", "on", "and", "or", "case", "when", "then", "else", "end"}:
-                cols.append(c.lower())
+        cols = extract_select_columns(m.group(1))
         cols = sorted(set(cols))[:40]
     # fingerprint do corpo (WHERE, CTEs, etc.) — evita IGUAL falso
     body_norm = re.sub(r"\s+", " ", clean).strip().lower()
@@ -1319,6 +1374,38 @@ def verify_card(config: dict, session: dict) -> dict:
         if c.get("policy_action") in {"create", "append"}
     )
     done = len(created_ok) + len(append_ok)
+
+    pending_only = []
+    for name in created_missing:
+        pending_only.append({
+            "name": name,
+            "action": "create",
+            "missing": [],
+            "message": f"Falta criar '{name}' na base.",
+        })
+    for name in append_missing:
+        detail = next(
+            (d for d in details if d.get("name") == name and d.get("action") == "append"),
+            {},
+        )
+        pending_only.append({
+            "name": name,
+            "action": "append",
+            "missing": list(detail.get("missing") or detail.get("expected") or []),
+            "message": detail.get("message") or f"Falta acrescer itens em '{name}'.",
+        })
+    for name in append_partial:
+        detail = next(
+            (d for d in details if d.get("name") == name and d.get("result") == "partial"),
+            {},
+        )
+        pending_only.append({
+            "name": name,
+            "action": "append",
+            "missing": list(detail.get("missing") or []),
+            "message": detail.get("message") or f"Acrescento parcial em '{name}'.",
+        })
+
     report = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "card_id": session.get("card_id"),
@@ -1331,27 +1418,43 @@ def verify_card(config: dict, session: dict) -> dict:
         "append_missing": append_missing,
         "diverged": diverged,
         "details": details,
+        "pending_only": pending_only,
         "complete": (
             not created_missing
             and not append_missing
             and not append_partial
         ),
         "summary_text": "",
+        "pending_markdown": "",
     }
-    lines = [
+
+    lines = []
+    if pending_only:
+        lines.append("=== SÓ O QUE FALTA ===")
+        for i, p in enumerate(pending_only, 1):
+            miss = p.get("missing") or []
+            extra = f" | falta: {', '.join(miss)}" if miss else ""
+            lines.append(f"  {i}. [{p['action']}] {p['name']}{extra}")
+            if p.get("message"):
+                lines.append(f"      {p['message']}")
+        lines.append("")
+    else:
+        lines.append("=== SÓ O QUE FALTA ===")
+        lines.append("  (nada pendente)")
+        lines.append("")
+
+    lines.extend([
         f"Planejado: {planned} ação(ões) · OK: {done}",
         f"Criados OK: {', '.join(created_ok) or '—'}",
-        f"Criados faltando: {', '.join(created_missing) or '—'}",
         f"Acrescentados OK: {', '.join(append_ok) or '—'}",
-        f"Acrescentados parciais: {', '.join(append_partial) or '—'}",
-        f"Acrescentados faltando: {', '.join(append_missing) or '—'}",
-    ]
+    ])
     if diverged:
         lines.append(
             "Atenção manual: "
             + "; ".join(d["name"] + " — " + d["message"] for d in diverged[:5])
         )
     report["summary_text"] = "\n".join(lines)
+    report["pending_markdown"] = build_pending_markdown(report)
     return report
 
 
@@ -1766,6 +1869,197 @@ def ignored_changes(ws_model: dict | None, base_model: dict | None) -> list[str]
     return notes
 
 
+def build_snippet(item: dict) -> dict:
+    """Texto para copiar: só adições (append) ou guia de criar (create)."""
+    action = item.get("policy_action") or ""
+    name = item.get("match_name") or item.get("name") or ""
+    path = item.get("path") or ""
+    adds = item.get("add_items") or []
+    base_cols = item.get("base_columns") or []
+    ignored = item.get("ignored_changes") or []
+
+    cols = [a["name"] for a in adds if a.get("kind") == "coluna"]
+    refs = [a["name"] for a in adds if a.get("kind") == "referência"]
+    sources = [a["name"] for a in adds if a.get("kind") == "origem"]
+    other = [
+        a for a in adds
+        if a.get("kind") not in {"coluna", "referência", "origem"}
+    ]
+
+    place = [a["name"] for a in adds]
+    exists = list(base_cols)
+    attention = list(ignored)
+
+    if action == "create" or item.get("status") == "NOVO":
+        lines = [
+            f"-- DBT Sentinel — CRIAR arquivo `{name}`",
+            "-- NÃO altere arquivos que já existem na base.",
+            f"-- Destino: {path or '(path no card)'}",
+            "-- Ação: copie o arquivo do workspace/ para o path acima.",
+            "--",
+            "-- Checklist do que este arquivo traz:",
+        ]
+        if cols:
+            lines.append("-- Colunas:")
+            for c in cols:
+                lines.append(f"--   - {c}")
+        if refs:
+            lines.append("-- Refs:")
+            for r in refs:
+                lines.append(f"--   - {{{{ ref('{r}') }}}}")
+        if sources:
+            lines.append("-- Sources:")
+            for s in sources:
+                lines.append(f"--   - {s}")
+        if not (cols or refs or sources):
+            lines.append("--   (ver arquivo no workspace)")
+        text = "\n".join(lines) + "\n"
+        label = "Guia para CRIAR (copie do workspace)"
+    elif action == "append":
+        lines = [
+            f"-- DBT Sentinel — ACRESCENTAR em `{name}`",
+            "-- Só adições. NÃO reescreva o arquivo principal.",
+            f"-- Path: {path or '(path no card)'}",
+            "--",
+        ]
+        if cols:
+            lines.append("-- Colunas novas (acrescente no SELECT):")
+            for i, c in enumerate(cols):
+                # vírgula à esquerda: padrão para colar após coluna existente
+                lines.append(f", {c}")
+            lines.append("--")
+        if refs:
+            lines.append("-- Refs novas (use no FROM/JOIN — não remova as antigas):")
+            for r in refs:
+                lines.append(f"-- {{{{ ref('{r}') }}}}")
+            lines.append("--")
+        if sources:
+            lines.append("-- Sources novas:")
+            for s in sources:
+                parts = str(s).split(".", 1)
+                if len(parts) == 2:
+                    lines.append(f"-- {{{{ source('{parts[0]}', '{parts[1]}') }}}}")
+                else:
+                    lines.append(f"-- {s}")
+            lines.append("--")
+        if other:
+            lines.append("-- Outros itens novos:")
+            for a in other:
+                lines.append(f"--   [{a.get('kind')}] {a.get('name')}")
+            lines.append("--")
+        if exists:
+            lines.append("-- Já na base (não mexer):")
+            lines.append("--   " + ", ".join(exists[:20]))
+            if len(exists) > 20:
+                lines.append(f"--   … +{len(exists) - 20}")
+            lines.append("--")
+        if attention:
+            lines.append("-- Atenções (NÃO aplicar do ZIP):")
+            for note in attention[:8]:
+                lines.append(f"--   ! {note}")
+        if not cols and not refs and not sources and not other:
+            lines.append("-- (sem itens novos detectados)")
+        text = "\n".join(lines) + "\n"
+        label = "Só adições — não reescreva"
+    else:
+        text = (
+            f"-- `{name}`: sem snippet de criação/acréscimo "
+            f"(ação={action or '—'}).\n"
+        )
+        label = "Sem snippet"
+        place, exists, attention = [], exists, attention
+
+    return {
+        "label": label,
+        "text": text,
+        "place": place,
+        "exists": exists,
+        "attention": attention,
+        "action": action or "",
+    }
+
+
+def build_order_markdown(checklist: list[dict], order: list[str], card_id: str = "") -> str:
+    """Roteiro Markdown colável (Jira / VS Code)."""
+    by_name = {c["name"]: c for c in checklist}
+    actionable = []
+    for n in order or []:
+        c = by_name.get(n)
+        if c and c.get("policy_action") in {"create", "append"}:
+            actionable.append(c)
+    seen = {c["name"] for c in actionable}
+    for c in checklist:
+        if c.get("policy_action") in {"create", "append"} and c["name"] not in seen:
+            actionable.append(c)
+            seen.add(c["name"])
+
+    lines = [f"# Card {card_id or 'CARD'} — roteiro", ""]
+    if not actionable:
+        lines.append("_Nada para executar neste card._")
+        lines.append("")
+        return "\n".join(lines)
+
+    for i, c in enumerate(actionable, 1):
+        action = c.get("policy_action")
+        target = c.get("match_name") or c["name"]
+        path = c.get("path") or ""
+        adds = c.get("add_items") or []
+        names = ", ".join(f"`{a['name']}`" for a in adds[:12])
+        more = f" (+{len(adds) - 12})" if len(adds) > 12 else ""
+        if action == "create":
+            lines.append(
+                f"{i}. [ ] **CRIAR** `{target}` — `{path}`"
+                + (f" — traz: {names}{more}" if names else "")
+            )
+        else:
+            lines.append(
+                f"{i}. [ ] **ACRESCENTAR** `{target}`"
+                + (f": {names}{more}" if names else " (itens novos do card)")
+                + (f" — `{path}`" if path else "")
+            )
+            lines.append("   - Só o novo. **Não reescreva** o arquivo principal.")
+
+    # atenções
+    att_lines = []
+    for c in checklist:
+        for note in c.get("ignored_changes") or []:
+            att_lines.append(f"- `{c['name']}`: {note}")
+        if c.get("policy_action") in {"skip", "review"}:
+            att_lines.append(
+                f"- `{c['name']}`: {c.get('add_summary') or c.get('hint') or 'revisar / não alterar'}"
+            )
+    if att_lines:
+        lines.append("")
+        lines.append("## Atenções")
+        lines.extend(att_lines[:30])
+    lines.append("")
+    lines.append("_Gerado pelo DBT Sentinel — somente adições; base corporativa read-only._")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_pending_markdown(report: dict) -> str:
+    """Markdown curto: só o que falta após verificação."""
+    card = report.get("card_id") or "CARD"
+    pending = report.get("pending_only") or []
+    lines = [f"# Card {card} — só o que falta", ""]
+    if not pending:
+        lines.append("Nada pendente — tudo que o card pediu parece estar na base.")
+        lines.append("")
+        return "\n".join(lines)
+    for i, p in enumerate(pending, 1):
+        miss = p.get("missing") or []
+        miss_s = (", ".join(f"`{m}`" for m in miss[:12]) if miss else "")
+        lines.append(
+            f"{i}. [ ] **{p.get('action', '').upper()}** `{p.get('name')}`"
+            + (f" — falta: {miss_s}" if miss_s else "")
+        )
+        if p.get("message"):
+            lines.append(f"   - {p['message']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def enrich_additive(
     checklist: list[dict],
     base: dict,
@@ -1858,6 +2152,10 @@ def enrich_additive(
         item["table_kind"] = item.get("table_kind") or detect_table_kind(
             name, item.get("layer", "")
         )
+        if item.get("policy_action") in {"create", "append"}:
+            item["snippet"] = build_snippet(item)
+        else:
+            item["snippet"] = None
     return checklist
 
 
@@ -1983,6 +2281,234 @@ def build_lineage(checklist: list[dict], graph: dict, models: dict) -> dict:
         "nodes": nodes,
         "edges": edges,
         "layers": [L for L in layers_order if any(n["layer"] == L for n in nodes)],
+    }
+
+
+def build_macro_view(
+    focus: str,
+    checklist: list[dict],
+    graph: dict,
+    models: dict,
+    base: dict | None = None,
+) -> dict:
+    """Visão MACRO: um arquivo no centro + vizinhos do grafo corporativo.
+
+    - Arquivo NOVO: nó verde encaixado via refs/sources no que já existe.
+    - Arquivo APPEND: nó cinza com destaque verde nos itens que o card acrescenta.
+    Vizinhos só-base ficam cinza (contexto).
+    """
+    base = base or {}
+    by_check = {c["name"]: c for c in checklist}
+    item = by_check.get(focus) or {}
+
+    names: set[str] = {focus}
+    # vizinhos transitivos no grafo unificado
+    if focus in graph:
+        names.update(upstream(graph, focus))
+        names.update(downstream(graph, focus))
+        names.update(graph[focus].get("refs") or [])
+        names.update(graph[focus].get("dependents") or [])
+    # refs/sources do checklist (garante encaixe mesmo se grafo incompleto)
+    for r in item.get("refs") or []:
+        names.add(r)
+    for schema, table in item.get("sources") or []:
+        names.add(f"source.{schema}.{table}")
+    match = item.get("match_name")
+    if match:
+        names.add(match)
+
+    # se ainda vazio além do focus, puxa 1 salto dos refs no models
+    mfocus = models.get(focus) or {}
+    for r in mfocus.get("refs") or []:
+        names.add(r)
+    for schema, table in mfocus.get("sources") or []:
+        names.add(f"source.{schema}.{table}")
+
+    def layer_of(n: str) -> str:
+        if n in by_check:
+            return by_check[n].get("layer") or "other"
+        if n.startswith("source."):
+            return "source"
+        if n in models:
+            return models[n].get("layer") or detect_layer(models[n].get("path", ""))
+        if n in base:
+            return base[n].get("layer") or detect_layer(base[n].get("path", ""))
+        return detect_layer(n) if "_" in n else "other"
+
+    def visual_of(n: str) -> str:
+        c = by_check.get(n)
+        if not c:
+            return "exist"
+        action = c.get("policy_action") or ""
+        if action == "create" or c.get("status") == "NOVO":
+            return "new"
+        if action == "append":
+            return "add"  # corporativo + verde no que acresce
+        if action in {"skip", "observe"} or c.get("status") == "REMOVIDO":
+            return "locked"
+        if action == "review":
+            return "review"
+        return "exist"
+
+    def origin_of(n: str) -> str:
+        in_base = n in base or n.startswith("source.")
+        in_ws = n in models and n not in base
+        if n.startswith("source."):
+            return "base"
+        if in_base and (by_check.get(n) or {}).get("status") in {"NOVO", "ALTERADO", "RENOMEADO"}:
+            return "both"
+        if (by_check.get(n) or {}).get("status") == "NOVO" or (
+            n not in base and n in models
+        ):
+            return "workspace"
+        if in_base:
+            return "base"
+        return "workspace" if in_ws else "context"
+
+    nodes = []
+    for n in sorted(names, key=lambda x: (layer_order(layer_of(x)), x)):
+        c = by_check.get(n)
+        m = models.get(n) or base.get(n) or {}
+        vis = visual_of(n)
+        add_items = list((c or {}).get("add_items") or [])
+        add_count = int((c or {}).get("add_count") or 0)
+        # para APPEND: itens novos são o destaque verde do macro
+        highlight_items = add_items if vis in {"new", "add"} else []
+        g = graph.get(n) or {"refs": [], "dependents": []}
+        # restringe depends/used_by ao recorte do macro
+        depends = [r for r in (g.get("refs") or []) if r in names]
+        used = [d for d in (g.get("dependents") or []) if d in names]
+        nodes.append({
+            "id": n,
+            "label": n,
+            "focus": n == focus,
+            "layer": layer_of(n),
+            "table_kind": (c or {}).get("table_kind") or detect_table_kind(n, layer_of(n)),
+            "visual": vis,
+            "origin": origin_of(n),
+            "status": (c or {}).get("status") or ("SOURCE" if n.startswith("source.") else "IGUAL"),
+            "policy_action": (c or {}).get("policy_action") or ("exists" if n in base or n.startswith("source.") else "create"),
+            "path": (c or {}).get("path") or m.get("path") or "",
+            "domain": (c or {}).get("domain") or m.get("domain") or "",
+            "in_checklist": c is not None,
+            "add_count": add_count,
+            "add_items": highlight_items,
+            "add_summary": (c or {}).get("add_summary") or "",
+            "columns": list((c or {}).get("columns") or m.get("columns") or []),
+            "base_columns": list((c or {}).get("base_columns") or (base.get(n) or {}).get("columns") or []),
+            "depends_on": depends,
+            "used_by": used,
+            "upstream": [u for u in upstream(graph, n) if u in names] if n in graph else [],
+            "downstream": [d for d in downstream(graph, n) if d in names] if n in graph else [],
+            "hint": (
+                "Arquivo novo — encaixa aqui no grafo corporativo."
+                if vis == "new" and n == focus
+                else (
+                    "Já existe na base — verde = só o que o card acrescenta."
+                    if vis == "add" and n == focus
+                    else "Contexto corporativo (já na base)."
+                )
+            ),
+        })
+
+    edges = []
+    node_ids = {n["id"] for n in nodes}
+    for n in nodes:
+        for ref in graph.get(n["id"], {}).get("refs", []):
+            if ref in node_ids:
+                # aresta "nova" se o destino é create ou a ref é item novo do append
+                dest = by_check.get(n["id"]) or {}
+                is_new_edge = (
+                    dest.get("policy_action") == "create"
+                    or dest.get("status") == "NOVO"
+                    or any(
+                        a.get("kind") == "referência" and a.get("name") == ref
+                        for a in (dest.get("add_items") or [])
+                    )
+                )
+                edges.append({
+                    "from": ref,
+                    "to": n["id"],
+                    "kind": "new" if is_new_edge else "exist",
+                })
+
+    layers_order = [
+        "source", "seed", "sample", "staging", "intermediate", "mart", "aggregate", "other"
+    ]
+    focus_item = by_check.get(focus) or {}
+    mode = (
+        "create"
+        if focus_item.get("policy_action") == "create" or focus_item.get("status") == "NOVO"
+        else (
+            "append"
+            if focus_item.get("policy_action") == "append"
+            else "context"
+        )
+    )
+    recompile = [
+        d for d in (downstream(graph, focus) if focus in graph else [])
+        if not str(d).startswith("source.")
+    ][:12]
+    snip = focus_item.get("snippet")
+    if not snip and focus_item.get("policy_action") in {"create", "append"}:
+        snip = build_snippet(focus_item)
+    return {
+        "focus": focus,
+        "mode": mode,
+        "title": focus,
+        "subtitle": (
+            "Arquivo novo no grafo corporativo (verde = criar)."
+            if mode == "create"
+            else (
+                "Arquivo já na base — destaque verde = o que acrescer."
+                if mode == "append"
+                else "Contexto do arquivo no grafo."
+            )
+        ),
+        "recompile": recompile,
+        "snippet": snip,
+        "nodes": nodes,
+        "edges": edges,
+        "layers": [L for L in layers_order if any(n["layer"] == L for n in nodes)],
+        "add_items": list(focus_item.get("add_items") or []),
+        "add_count": int(focus_item.get("add_count") or 0),
+    }
+
+
+def build_macros(
+    checklist: list[dict],
+    graph: dict,
+    models: dict,
+    base: dict | None = None,
+) -> dict:
+    """Uma visão macro por arquivo criar/acrescentar (focos do card)."""
+    focuses = []
+    for c in checklist:
+        if c.get("policy_action") in {"create", "append"} or c.get("status") == "NOVO":
+            focuses.append({
+                "id": c["name"],
+                "label": c["name"],
+                "mode": "create" if (c.get("policy_action") == "create" or c["status"] == "NOVO") else "append",
+                "layer": c.get("layer") or "",
+                "domain": c.get("domain") or "",
+                "add_count": int(c.get("add_count") or 0),
+                "order": int(c.get("suggested_order") or 999),
+            })
+    # dedupe + sort
+    seen = set()
+    uniq = []
+    for f in sorted(focuses, key=lambda x: (x["order"], x["id"])):
+        if f["id"] not in seen:
+            seen.add(f["id"])
+            uniq.append(f)
+    by_focus = {
+        f["id"]: build_macro_view(f["id"], checklist, graph, models, base)
+        for f in uniq
+    }
+    return {
+        "focuses": uniq,
+        "by_focus": by_focus,
+        "default": uniq[0]["id"] if uniq else "",
     }
 
 
@@ -2134,6 +2660,8 @@ def run(config: dict) -> dict:
     checklist.sort(key=lambda c: (0 if c["status"] != "IGUAL" else 1, c["layer_order"], c.get("suggested_order", 999), c["name"]))
 
     lineage = build_lineage(checklist, graph, merged)
+    macros = build_macros(checklist, graph, merged, base)
+    order_markdown = build_order_markdown(checklist, order, card_id)
 
     summary = {
         "novo": sum(1 for c in checklist if c.get("policy_action") == "create" or c["status"] == "NOVO"),
@@ -2215,8 +2743,10 @@ def run(config: dict) -> dict:
         "checklist": checklist,
         "warnings": warnings,
         "order": order,
+        "order_markdown": order_markdown,
         "flow_chains": build_flow_chains(checklist, graph),
         "lineage": lineage,
+        "macro": macros,
         "timeline": load_timeline(snapshots_path),
         "patterns": patterns,
         "empty_workspace": empty_ws,

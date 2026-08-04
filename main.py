@@ -21,7 +21,7 @@ def load_config() -> dict:
         print(f"ERRO: config.json não encontrado em {CONFIG_PATH}")
         sys.exit(1)
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
             cfg = json.load(f)
     except json.JSONDecodeError as e:
         print(f"ERRO: config.json inválido: {e}")
@@ -159,6 +159,11 @@ def save_snapshot(cfg: dict, session: dict, verification: dict | None = None) ->
         assert_write_target(vpath, [cfg["snapshots_path"]])
         with open(vpath, "w", encoding="utf-8") as f:
             json.dump(verification, f, ensure_ascii=False, indent=2)
+        pmd = verification.get("pending_markdown") or engine.build_pending_markdown(verification)
+        ppath = os.path.join(dest, "pending.md")
+        assert_write_target(ppath, [cfg["snapshots_path"]])
+        with open(ppath, "w", encoding="utf-8") as f:
+            f.write(pmd)
     return path
 
 
@@ -229,16 +234,26 @@ def print_config_wizard(cfg: dict) -> None:
 def print_verification(report: dict) -> None:
     print()
     print("=" * 56)
-    print("  VERIFICAÇÃO FINAL DO CARD")
+    print("  VERIFICAÇÃO FINAL — SÓ O QUE FALTA")
     print("=" * 56)
+    pending = report.get("pending_only") or []
+    if pending:
+        for i, p in enumerate(pending, 1):
+            miss = p.get("missing") or []
+            extra = f" | falta: {', '.join(miss)}" if miss else ""
+            print(f"  {i}. [{p.get('action')}] {p.get('name')}{extra}")
+            if p.get("message"):
+                print(f"      {p['message']}")
+    else:
+        print("  (nada pendente)")
+    print()
     print(report.get("summary_text") or "")
     if report.get("complete"):
         print()
         print("  ✓ Tudo que o card pediu parece estar na base.")
     else:
         print()
-        print("  ✗ Ainda há pendências ou acrescentos incompletos.")
-        print("  Revise a lista acima antes de fechar o card no Jira.")
+        print("  ✗ Ainda há pendências — use a lista acima (não o card inteiro).")
     if report.get("diverged"):
         print("  (Houve diferenças manuais/SQL ignoradas — valide SaaS/BQ.)")
     print("=" * 56)
@@ -288,14 +303,18 @@ def main() -> None:
     out_dir = cfg["output_path"]
     session_path = os.path.join(out_dir, "session.json")
     html_path = os.path.join(out_dir, "index.html")
+    roteiro_path = os.path.join(out_dir, "roteiro.md")
 
     try:
         assert_write_target(session_path, [out_dir])
         assert_write_target(html_path, [out_dir])
+        assert_write_target(roteiro_path, [out_dir])
         with open(session_path, "w", encoding="utf-8") as f:
             json.dump(session, f, ensure_ascii=False, indent=2)
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(ui.render(session))
+        with open(roteiro_path, "w", encoding="utf-8") as f:
+            f.write(session.get("order_markdown") or "")
     except (OSError, RuntimeError) as e:
         print(f"ERRO ao gravar relatório: {e}")
         sys.exit(1)
@@ -312,6 +331,7 @@ def main() -> None:
     print_summary(session)
     print(f"\n  Relatório: {html_path}")
     print(f"  Sessão:    {session_path}")
+    print(f"  Roteiro:   {roteiro_path}")
 
     try:
         webbrowser.open(html_path)
@@ -343,6 +363,17 @@ def main() -> None:
         print(f"AVISO: falha na verificação final: {e}")
         verification = {"complete": False, "summary_text": str(e), "details": []}
     print_verification(verification)
+
+    # grava pending.md no output para colar no Jira
+    try:
+        pending_path = os.path.join(out_dir, "pending.md")
+        assert_write_target(pending_path, [out_dir])
+        pmd = verification.get("pending_markdown") or engine.build_pending_markdown(verification)
+        with open(pending_path, "w", encoding="utf-8") as f:
+            f.write(pmd)
+        print(f"  Pendências: {pending_path}")
+    except (OSError, RuntimeError) as e:
+        print(f"AVISO: não gravou pending.md: {e}")
 
     if not verification.get("complete"):
         try:

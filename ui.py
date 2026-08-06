@@ -363,6 +363,26 @@ def _ordem(session: dict) -> str:
     if not actionable:
         return '<p class="ok-msg">Nada para executar neste card.</p>'
 
+    order_meta = session.get("order_meta") or {}
+    notice = ""
+    if order_meta.get("has_cycle") or any(
+        w.get("code") == "DAG_CYCLE" for w in (session.get("warnings") or [])
+    ):
+        blocked = order_meta.get("blocked_by_cycle") or []
+        notice = (
+            '<div class="gate-banner blocked soft">'
+            "<strong>Ciclo na DAG detectado</strong> — o dbt não compila com loop "
+            "(ex. A→B→C→A). Veja <label for=\"t6\" class=\"gate-link\">Avisos</label> "
+            "e o caminho no <label for=\"t4\" class=\"gate-link\">Fluxo</label>. "
+            "Se a IA errou a ref, corrija manualmente e rode de novo."
+            + (
+                f" Nós no loop: {', '.join(f'<code>{_esc(n)}</code>' for n in blocked[:8])}."
+                if blocked
+                else ""
+            )
+            + "</div>"
+        )
+
     steps = []
     for i, c in enumerate(actionable, 1):
         action = c.get("policy_action")
@@ -428,7 +448,8 @@ def _ordem(session: dict) -> str:
 </div>
 """
     return (
-        roteiro
+        notice
+        + roteiro
         + '<p class="guide">Execute <strong>nesta ordem</strong> (dependências primeiro). '
         "Verde = criar arquivo · Âmbar = acrescer só o novo no arquivo que já existe. "
         "Use <strong>Copiar</strong> nos snippets — só adições, nunca reescreva o principal.</p>"
@@ -586,20 +607,41 @@ def _wizard(session: dict) -> str:
             "step-stop",
         )
 
-    gold = ""
-    if add_only:
-        gold = """
+    gold = """
 <div class="gold-rule">
-  <strong>Seu trabalho no card</strong>
+  <strong>Jornada do card — etapa por etapa</strong>
   <p>
-    Olhe o arquivo principal na base → veja o que <span class="tag append">já existe</span>
-    e o que <span class="tag new">precisa colocar</span> → acrescente só as diferenças → rode o dbt.
-    <span class="tag block">Não reescreva</span> o principal.
+    A IA/ZIP pode vir errada: use o Sentinel para ver o que criar/acrescer,
+    <strong>refatore o SQL fino na base</strong>, depois valide com dbt e o <code>S</code>.
   </p>
 </div>
+<ol class="journey-steps">
+  <li>
+    <strong>1. Diff</strong> — no arquivo principal: o que <em>já existe</em> × o que <em>colocar</em>.
+    <label for="t2" class="btn-go-order">Abrir Diff</label>
+  </li>
+  <li>
+    <strong>2. Ordem</strong> — copie o snippet (<em>só a adição</em>); arquivos novos = copiar do workspace.
+    <label for="t3" class="btn-go-order ghost">Abrir Ordem</label>
+  </li>
+  <li>
+    <strong>3. Aplicar na base</strong> — colar só diferenças / criar arquivos. Se a IA errou, ajuste o SQL aqui.
+  </li>
+  <li>
+    <strong>4. Fluxo / Avisos</strong> — confira ciclo na DAG (A→…→A), refs e sources.
+    <label for="t4" class="btn-go-order ghost">Fluxo</label>
+    <label for="t6" class="btn-go-order ghost">Avisos</label>
+  </li>
+  <li>
+    <strong>5. dbt / SaaS / BQ</strong> — compile e valide de verdade (o Sentinel não executa dbt).
+  </li>
+  <li>
+    <strong>6. Fechar</strong> — no terminal digite <strong>S</strong> → <code>pending.md</code> (o que ainda falta).
+  </li>
+</ol>
 <p class="journey-cta">
-  <label for="t2" class="btn-go-order">Abrir Diff</label>
-  <label for="t3" class="btn-go-order ghost">Depois: Ordem</label>
+  <label for="t2" class="btn-go-order">Começar pelo Diff</label>
+  <label for="t3" class="btn-go-order ghost">Ir para Ordem</label>
 </p>
 """
 
@@ -676,7 +718,34 @@ def _flow(session: dict) -> str:
         for e in edges[:80]
     )
 
+    cycles = session.get("dag_cycles") or []
+    cycle_html = ""
+    if cycles:
+        cycle_edges = set()
+        for c in cycles:
+            for e in c.get("cut_edges") or []:
+                cycle_edges.add((e.get("from"), e.get("to")))
+        cycle_lis = "".join(
+            f"<li class=\"cycle-path\"><code>{_esc(c.get('path'))}</code>"
+            f"<br><span class=\"muted\">{_esc(c.get('hint') or '')}</span></li>"
+            for c in cycles[:8]
+        )
+        edge_cycle_lis = "".join(
+            f"<li class=\"cycle-edge\"><code>{_esc(a)}</code> ↔ <code>{_esc(b)}</code></li>"
+            for a, b in list(cycle_edges)[:20]
+        )
+        cycle_html = f"""
+<div class="cycle-box" id="dag-cycles">
+  <h3>Ciclo na DAG — dbt não compila</h3>
+  <ul>{cycle_lis}</ul>
+  <p class="hint">Arestas candidatas a cortar (remova uma ref):</p>
+  <ul>{edge_cycle_lis or '<li>Ver caminho acima.</li>'}</ul>
+  <p class="jump-row"><label for="t6" class="gate-link">Ver em Avisos</label></p>
+</div>
+"""
+
     return f"""
+{cycle_html}
 <div class="lineage-wrap">
   <div class="ln-legend">
     <span><i class="dot exist"></i> Cinza — já existe</span>
@@ -959,9 +1028,35 @@ header.app .pitch {{
 #t6:checked ~ nav.tabs label[for="t6"] {{
   color:#fff; border-color:var(--ink); background:var(--ink); font-weight:700;
 }}
+#t1:checked ~ nav.tabs label[for="t1"] {{
+  background:var(--new); border-color:var(--new); color:#fff;
+}}
 #t2:checked ~ nav.tabs label[for="t2"] {{
   background:var(--new); border-color:var(--new); color:#fff;
 }}
+.gate-banner {{
+  margin:0 0 1rem; padding:.75rem 1rem; border-radius:10px;
+  border:1px solid var(--line); font-size:.95rem;
+}}
+.gate-banner.blocked {{ background:var(--block-bg); border-color:#fca5a5; color:var(--block); }}
+.gate-banner.soft {{ margin:0 0 1rem; }}
+.gate-link {{
+  cursor:pointer; text-decoration:underline; font-weight:700; color:inherit;
+}}
+.cycle-box {{
+  background:#fff1f2; border:1px solid #fecdd3; border-radius:12px;
+  padding:1rem 1.15rem; margin-bottom:1rem;
+}}
+.cycle-box h3 {{ margin:0 0 .5rem; color:var(--block); }}
+.cycle-path code {{ color:var(--block); font-weight:700; }}
+.journey-steps {{
+  list-style:none; margin:0 0 1rem; padding:0; display:grid; gap:.65rem;
+}}
+.journey-steps li {{
+  background:var(--panel); border:1px solid var(--line); border-radius:12px;
+  padding:.85rem 1rem; display:flex; flex-wrap:wrap; align-items:center; gap:.5rem .75rem;
+}}
+.journey-steps li strong {{ min-width:9rem; }}
 .grid {{ display:grid; gap:1rem; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); }}
 .card {{
   background:var(--panel); border:1px solid var(--line); border-radius:16px;
@@ -1307,19 +1402,20 @@ nav.tabs label[for="t2"] {{
     <div class="stat hl-append">Acrescentar: <b>{s.get('acrescentar', 0)}</b></div>
     <div class="stat hl-block">Não alterar: <b>{s.get('nao_alterar', 0)}</b></div>
     <div class="stat">Bloqueios: <b>{s.get('critical', 0)}</b></div>
+    <div class="stat">Ciclos: <b>{s.get('cycle_count', 0)}</b></div>
   </div>
 </header>
 
 {"<div class='msg'>" + _esc(msg) + "</div>" if msg else ""}
 
 <div class="pipeline">
-  <span class="pipe-step">1 Card Jira</span>
+  <span class="pipe-step on">1 Resumo (etapas)</span>
   <span class="pipe-arrow">→</span>
-  <span class="pipe-step on">2 Diff (existe × colocar)</span>
+  <span class="pipe-step on">2 Diff</span>
   <span class="pipe-arrow">→</span>
-  <span class="pipe-step on">3 Aplicar na ordem</span>
+  <span class="pipe-step on">3 Ordem (só adição)</span>
   <span class="pipe-arrow">→</span>
-  <span class="pipe-step">4 dbt / SaaS / BQ</span>
+  <span class="pipe-step">4 dbt / SaaS / BQ → S</span>
   <label for="t2" class="btn-go-order" style="margin-left:auto">Abrir Diff</label>
 </div>
 
@@ -1327,14 +1423,16 @@ nav.tabs label[for="t2"] {{
   <summary>Seu fluxo</summary>
   <ol>
     <li>Recebe o card no Jira e extrai o ZIP no <code>workspace/</code>.</li>
-    <li>Abra <strong>Diff</strong>: no arquivo principal, veja o que <em>já existe</em> e o que <em>precisa colocar</em>.</li>
-    <li>Em <strong>Ordem</strong>, copie o snippet e acrescente só as diferenças (não reescreva o arquivo).</li>
-    <li>Rode no dbt / valide SaaS + BQ. No terminal: <strong>S</strong> para fechar o card.</li>
+    <li>Abra <strong>Resumo</strong>: siga as etapas na ordem.</li>
+    <li><strong>Diff</strong>: no arquivo principal, veja o que <em>já existe</em> e o que <em>precisa colocar</em>.</li>
+    <li><strong>Ordem</strong>: copie o snippet e acrescente só as diferenças (não reescreva o arquivo).</li>
+    <li>Se a IA errou o SQL, refatore na base e valide com dbt. <strong>Avisos</strong> / <strong>Fluxo</strong> ajudam com ciclo e refs.</li>
+    <li>No terminal: <strong>S</strong> para fechar o card e gerar <code>pending.md</code>.</li>
   </ol>
 </details>
 
-<input type="radio" name="tab" id="t1">
-<input type="radio" name="tab" id="t2" checked>
+<input type="radio" name="tab" id="t1" checked>
+<input type="radio" name="tab" id="t2">
 <input type="radio" name="tab" id="t3">
 <input type="radio" name="tab" id="t4">
 <input type="radio" name="tab" id="t5">
@@ -1349,7 +1447,8 @@ nav.tabs label[for="t2"] {{
 </nav>
 
 <section class="panel p1">
-  <h2>Resumo do card</h2>
+  <h2>Resumo — o que fazer neste card</h2>
+  <p class="hint">Siga as etapas abaixo. Depois use Diff e Ordem para copiar só o que falta.</p>
   {_wizard(session)}
 </section>
 
@@ -1383,7 +1482,7 @@ nav.tabs label[for="t2"] {{
 
 <section class="panel p6">
   <h2>Avisos</h2>
-  <p class="hint">Bloqueios, taxonomia e política — só se precisar.</p>
+  <p class="hint">Ciclos na DAG, refs, sources, taxonomia e política — use quando a IA/ZIP vier estranha.</p>
   {_alerts(session)}
 </section>
 

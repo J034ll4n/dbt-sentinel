@@ -30,10 +30,39 @@ No `config.json`:
 1. Configure `base_project_path` + `card_id` (e `base_include` se quiser filtrar)
 2. Extraia o ZIP em `workspace/`
 3. `py -3 main.py`
-4. Abra `output/index.html` → aba **Diff** (existe × colocar)
-5. **Ordem** → copie o snippet e acrescente só as diferenças
-6. Rode o dbt / SaaS + BQ → `S` no terminal → limpe `workspace/`
+4. Abra `output/index.html` → aba **Resumo** (etapas)
+5. **Diff** → **Ordem** (só adição)
+6. Refatore na base se a IA errou → `dbt compile` / SaaS / BQ → `S` no terminal
 
 ### Regra de ouro
 
 `add_only: true` (padrão): **não altere** arquivos que já existem na base — só adicione o que veio de novo no card.
+
+Exemplo em `carros.int` (já existe): cole **só** isto, nunca o SQL inteiro:
+
+```sql
+-- CARD-XXX — acrescentar em carros.int
+, coluna_nova_1
+, coluna_nova_2
+```
+
+## Método de 1 dia
+
+O ZIP/IA **não** vem 100% certo. O Sentinel mostra o que criar/acrescer; **você** fecha o SQL fino e valida com dbt.
+
+1. Config + ZIP em `workspace/` → `py -3 main.py`
+2. **Resumo** — seguir as etapas na ordem
+3. **Diff** — Criar / Acrescentar / Ignorar
+4. **Ordem** — snippet **só com a adição**; arquivo novo = copiar do workspace
+5. Aplicar na base; se a IA errou, refatorar aí
+6. **Fluxo / Avisos** — ciclo `A→…→A`, refs, sources (informativo)
+7. `dbt compile` / SaaS / BQ
+8. Terminal **`S`** → `pending.md`
+
+Artefatos em `output/`:
+
+| Arquivo | Uso |
+|---------|-----|
+| `index.html` | Resumo, Diff, Ordem, Fluxo, Zoom, Avisos |
+| `roteiro.md` | Sequência + snippets |
+| `pending.md` | O que faltou após o `S` |

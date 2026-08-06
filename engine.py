@@ -1185,6 +1185,164 @@ def find_cycles(graph: dict) -> list[list[str]]:
     return unique
 
 
+def analyze_dag_cycles(graph: dict) -> list[dict]:
+    """Ciclos com caminho e arestas candidatas a cortar (não altera find_cycles)."""
+    out = []
+    for cyc in find_cycles(graph):
+        if not cyc or len(cyc) < 2:
+            continue
+        path = " → ".join(cyc)
+        nodes = cyc[:-1]
+        cut_edges = []
+        for i in range(len(cyc) - 1):
+            a, b = cyc[i], cyc[i + 1]
+            cut_edges.append({"from": a, "to": b})
+        out.append({
+            "path": path,
+            "nodes": nodes,
+            "cycle": list(cyc),
+            "cut_edges": cut_edges,
+            "hint": (
+                f"Remova uma ref() neste loop (candidatas: "
+                + ", ".join(f"{e['from']}→{e['to']}" for e in cut_edges[:4])
+                + ")."
+            ),
+        })
+    return out
+
+
+def topo_order_meta(checklist: list[dict], graph: dict, order: list[str] | None = None) -> dict:
+    """Metadados da ordem: prefixo seguro vs nós travados por ciclo (ordem atual intacta)."""
+    order = list(order) if order is not None else topo_order(checklist, graph)
+    cycles = analyze_dag_cycles(graph)
+    blocked_set: set[str] = set()
+    for c in cycles:
+        for n in c.get("nodes") or []:
+            blocked_set.add(n)
+
+    by_name = {c["name"]: c for c in checklist}
+    pending = [
+        c["name"]
+        for c in checklist
+        if c.get("policy_action") in {"create", "append"}
+        or c["status"] in {"NOVO", "ALTERADO", "RENOMEADO"}
+    ]
+    seen: set[str] = set()
+    pending_u = []
+    for n in pending:
+        if n not in seen:
+            seen.add(n)
+            pending_u.append(n)
+    pending_set = set(pending_u)
+
+    def sort_key(name: str) -> tuple:
+        c = by_name.get(name) or {}
+        layer = c.get("layer") or "other"
+        kind = c.get("table_kind") or detect_table_kind(name, layer)
+        kind_boost = {"AGGR": 2, "F": 1, "DIB": 1}.get(kind or "", 0)
+        return (layer_order(layer), kind_boost, name)
+
+    indeg = {n: 0 for n in pending_u}
+    for n in pending_u:
+        for r in graph.get(n, {}).get("refs", []):
+            if r in pending_set:
+                indeg[n] = indeg.get(n, 0) + 1
+
+    ready = sorted([n for n, d in indeg.items() if d == 0], key=sort_key)
+    safe_prefix: list[str] = []
+    while ready:
+        n = ready.pop(0)
+        safe_prefix.append(n)
+        for dep in graph.get(n, {}).get("dependents", []):
+            if dep in indeg:
+                indeg[dep] -= 1
+                if indeg[dep] == 0:
+                    ready.append(dep)
+                    ready.sort(key=sort_key)
+
+    blocked_by_cycle = [n for n in pending_u if n not in safe_prefix]
+    # reforça com nós explicitamente no ciclo
+    for n in sorted(blocked_set):
+        if n in pending_set and n not in blocked_by_cycle:
+            blocked_by_cycle.append(n)
+
+    return {
+        "order": order,
+        "safe_prefix": safe_prefix,
+        "blocked_by_cycle": blocked_by_cycle,
+        "has_cycle": bool(cycles),
+        "cycle_count": len(cycles),
+        "cycles": cycles,
+    }
+
+
+def layer_edge_violations(
+    checklist: list[dict],
+    graph: dict,
+    models: dict | None = None,
+) -> list[dict]:
+    """Refs que invertem/pulam camada (stg→mart, mart→stg, etc.)."""
+    models = models or {}
+    by_name = {c["name"]: c for c in checklist}
+    violations = []
+
+    def layer_of(name: str) -> str:
+        if name.startswith("source."):
+            return "source"
+        c = by_name.get(name) or {}
+        if c.get("layer"):
+            return c["layer"]
+        m = models.get(name) or {}
+        if m.get("layer"):
+            return m["layer"]
+        return detect_layer(m.get("path") or name)
+
+    for item in checklist:
+        name = item["name"]
+        src_layer = item.get("layer") or layer_of(name)
+        src_ord = layer_order(src_layer)
+        actionable = item.get("policy_action") in {"create", "append"} or item.get("status") == "NOVO"
+        for ref in item.get("refs") or graph.get(name, {}).get("refs", []):
+            if not ref or ref.startswith("source."):
+                # source como ref de modelo é ok (camada 1)
+                continue
+            dst_layer = layer_of(ref)
+            dst_ord = layer_order(dst_layer)
+            # invertido: depende de camada mais "baixa" (downstream)
+            if dst_ord > src_ord and src_layer != "other" and dst_layer != "other":
+                violations.append({
+                    "model": name,
+                    "ref": ref,
+                    "from_layer": src_layer,
+                    "to_layer": dst_layer,
+                    "kind": "inverted",
+                    "actionable": actionable,
+                    "message": (
+                        f"'{name}' ({src_layer}) referencia '{ref}' ({dst_layer}) — "
+                        f"camada invertida (dbt não deve apontar para downstream)."
+                    ),
+                })
+            # pulo agressivo: source/sample direto para mart/aggregate sem staging
+            elif (
+                src_layer in {"mart", "aggregate"}
+                and dst_layer in {"source", "sample"}
+                and actionable
+            ):
+                violations.append({
+                    "model": name,
+                    "ref": ref,
+                    "from_layer": src_layer,
+                    "to_layer": dst_layer,
+                    "kind": "skip",
+                    "actionable": actionable,
+                    "message": (
+                        f"'{name}' ({src_layer}) referencia direto '{ref}' ({dst_layer}). "
+                        f"Prefira passar por staging/intermediate."
+                    ),
+                })
+    return violations
+
+
 def downstream(graph: dict, name: str) -> list[str]:
     if name not in graph:
         return []
@@ -1506,15 +1664,38 @@ def validate(
         for schema, table in m.get("sources", []):
             known.add(f"source.{schema}.{table}")
 
-    cycles = find_cycles(graph)
-    for cyc in cycles:
-        path = " → ".join(cyc)
+    dag_cycles = analyze_dag_cycles(graph)
+    for info in dag_cycles:
+        cyc = info.get("cycle") or []
+        path = info.get("path") or " → ".join(cyc)
+        warnings.append({
+            "severity": "critical",
+            "label": "Ciclo na DAG",
+            "code": "DAG_CYCLE",
+            "model": cyc[0] if cyc else "",
+            "cycle_path": path,
+            "cut_edges": info.get("cut_edges") or [],
+            "message": (
+                f"Loop no fluxo (dbt não compila): {path}. "
+                f"Ex.: A→B→C→D→A é inválido."
+            ),
+            "action": info.get("hint") or "Remova uma das referências circulares (ref).",
+        })
+
+    for viol in layer_edge_violations(checklist, graph, models):
+        # aviso (não bloqueio rígido): ZIP/IA pode trazer ref errada e você refatora na base
+        code = "LAYER_INVERTED" if viol.get("kind") == "inverted" else "LAYER_SKIP"
         warnings.append({
             "severity": "warning",
-            "label": "Atenção",
-            "model": cyc[0] if cyc else "",
-            "message": f"Existe um loop no fluxo: {path}. Isso impede a compilação.",
-            "action": "Remova uma das referências circulares.",
+            "label": "Camada",
+            "code": code,
+            "model": viol.get("model") or "",
+            "ref": viol.get("ref") or "",
+            "message": viol.get("message") or "",
+            "action": (
+                f"Ajuste ref('{viol.get('ref')}') para respeitar "
+                f"source → sample → stg → int → mart → aggregate."
+            ),
         })
 
     for item in checklist:
@@ -1601,6 +1782,7 @@ def validate(
                 warnings.append({
                     "severity": sev,
                     "label": "Bloqueio" if sev == "critical" else "Atenção",
+                    "code": "BROKEN_REF" if sev == "critical" else "BROKEN_REF_INFO",
                     "model": name,
                     "message": (
                         f"O arquivo {name} referencia {ref}, mas ele não existe no projeto. "
@@ -1624,6 +1806,7 @@ def validate(
                     warnings.append({
                         "severity": "warning",
                         "label": "Sources",
+                        "code": "UNDECLARED_SOURCE",
                         "model": name,
                         "message": (
                             f"O arquivo {name} usa source('{schema}', '{table}'), "
@@ -1636,7 +1819,8 @@ def validate(
                 elif src not in known:
                     warnings.append({
                         "severity": "warning",
-                        "label": "Atenção",
+                        "label": "Sources",
+                        "code": "UNDECLARED_SOURCE",
                         "model": name,
                         "message": (
                             f"O arquivo {name} usa a origem {schema}.{table}. "
@@ -2651,6 +2835,8 @@ def run(config: dict) -> dict:
         declared_sources=declared_sources,
     )
     order = topo_order(checklist, graph)
+    order_meta = topo_order_meta(checklist, graph, order=order)
+    dag_cycles = order_meta.get("cycles") or analyze_dag_cycles(graph)
 
     # aplicar ordem sugerida no checklist
     order_idx = {n: i for i, n in enumerate(order)}
@@ -2693,6 +2879,7 @@ def run(config: dict) -> dict:
         "warning": sum(1 for w in warnings if w["severity"] == "warning"),
         "base_models": len(base),
         "workspace_models": len(ws),
+        "cycle_count": len(dag_cycles),
     }
 
     empty_ws = len(ws) == 0
@@ -2743,7 +2930,9 @@ def run(config: dict) -> dict:
         "checklist": checklist,
         "warnings": warnings,
         "order": order,
+        "order_meta": order_meta,
         "order_markdown": order_markdown,
+        "dag_cycles": dag_cycles,
         "flow_chains": build_flow_chains(checklist, graph),
         "lineage": lineage,
         "macro": macros,

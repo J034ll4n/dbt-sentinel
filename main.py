@@ -181,6 +181,7 @@ def print_summary(session: dict) -> None:
     print(f"  Revisar:      {s.get('revisar', 0)}")
     print(f"  Já na base:   {s.get('igual', 0)}")
     print(f"  Bloqueios:    {s.get('critical', 0)}")
+    print(f"  Ciclos DAG:   {s.get('cycle_count', 0)}")
     print(f"  Pendentes:    {s.get('pending', 0)}")
     if session.get("message"):
         print()

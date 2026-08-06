@@ -29,7 +29,10 @@ O problema não é “abrir o ZIP”. O problema é:
 3. **Há dependências e ordem de aplicação**  
    Criar/acrescentar fora de ordem quebra compilação (`ref`, staging → mart, etc.).
 
-4. **O ambiente de trabalho é limitado**  
+4. **A IA/ZIP pode vir com SQL errado**  
+   O consultor precisa refatorar na base e validar com dbt — o Sentinel acelera a decisão, não substitui o compile.
+
+5. **O ambiente de trabalho é limitado**  
    Em VDI corporativa muitas vezes não há como instalar bibliotecas ou montar front-end moderno.
 
 **DBT Sentinel resolve isso** transformando a comparação card × base em um assistente visual de decisão: criar, acrescer só o novo, ou não mexer — com snippets prontos para copiar e verificação no fechamento do card.
@@ -58,17 +61,18 @@ Card Jira (ZIP)     Projeto dbt corporativo
   - **Acrescentar** — existe na base; o card trouxe itens novos (colunas, refs, …)
   - **Não alterar / Revisar** — mudança no ZIP que **não** deve ser aplicada no principal
 - Monta grafo de dependências e ordem topológica (source → sample → staging → intermediate → dim/fato → aggregate)
+- Detecta **ciclo na DAG** (`A→B→C→A` — dbt não compila), refs quebradas, sources e camada invertida (em **Avisos** / **Fluxo**)
 
 ### Interface (`output/index.html`)
 
 | Aba | Função |
 |---|---|
-| **Diff** | Núcleo do trabalho: no arquivo principal, **o que já existe** × **o que colocar** |
-| **Ordem** | Sequência de execução + **snippets copiáveis** (só adições) + roteiro Markdown |
-| **Fluxo** | Lineage do card (quem alimenta quem; setas que se dividem) |
+| **Resumo** | Página principal: **etapas do card** + checklist do que criar/acrescer |
+| **Diff** | No arquivo principal: **o que já existe** × **o que colocar** |
+| **Ordem** | Sequência + **snippets só com adições** + `roteiro.md` |
+| **Fluxo** | Lineage do card + alerta visual de ciclo na DAG |
 | **Zoom** | Um arquivo no contexto da base: encaixe, itens novos, impacto a jusante |
-| **Resumo** | Visão geral do card e próximos passos |
-| **Avisos** | Bloqueios, taxonomia, sources não declarados, política |
+| **Avisos** | Ciclos, refs, sources, taxonomia, política |
 
 ### Fechamento do card (CLI)
 
@@ -78,11 +82,17 @@ Ao confirmar no terminal (`S`):
 - Gera `pending.md` para colar no Jira
 - Grava snapshot do card em `snapshots/` (auditoria)
 
+### Método de 1 dia
+
+Passo a passo: **[GUIA_DE_USO.md](GUIA_DE_USO.md)**.  
+Resumo → Diff → Ordem (só adição) → refatorar se a IA errou → dbt → `S`.
+
 ### O que ele **não** faz
 
 - Não altera o repositório dbt corporativo
 - Não executa `dbt run` / `dbt test`
 - Não valida BigQuery nem o SaaS no seu lugar
+- Não “trava” a entrega se o ZIP da IA estiver errado — você refatora e valida com dbt
 
 Ele acelera a **decisão e a aplicação manual segura**; a validação final continua sendo sua (dbt / SaaS / BQ).
 
@@ -98,9 +108,9 @@ Ele acelera a **decisão e a aplicação manual segura**; a validação final co
 py -3 main.py
 ```
 
-4. Abrir `output/index.html` → aba **Diff**
-5. Em **Ordem**, copiar o snippet e acrescentar **apenas as diferenças** no arquivo principal
-6. Rodar dbt / validar SaaS + BQ
+4. Abrir `output/index.html` → aba **Resumo** (etapas)
+5. **Diff** → **Ordem**: copiar snippet e acrescentar **apenas as diferenças**
+6. Se a IA errou o SQL, refatorar na base → `dbt compile` / SaaS + BQ
 7. No terminal, responder `S` para verificação final e snapshot
 
 Checklist operacional curto: [`GUIA_DE_USO.md`](GUIA_DE_USO.md).
@@ -117,6 +127,14 @@ Checklist operacional curto: [`GUIA_DE_USO.md`](GUIA_DE_USO.md).
 | Base corporativa | **Somente leitura** |
 
 Controlado por `add_only: true` (padrão).
+
+Exemplo de snippet (arquivo que já existe):
+
+```sql
+-- CARD-XXX — acrescentar em carros.int
+, coluna_nova_1
+, coluna_nova_2
+```
 
 ---
 
@@ -164,8 +182,8 @@ Escrita permitida apenas em `output/` e `snapshots/`. Paths protegidos; HTML esc
 
 ```text
 main.py          CLI, verificação final, snapshot
-engine.py        Parse, diff aditivo, grafo, lineage, snippets
-ui.py            Relatório HTML (Diff / Ordem / Fluxo / Zoom)
+engine.py        Parse, diff aditivo, grafo, ciclos DAG, lineage, snippets
+ui.py            Relatório HTML (Resumo / Diff / Ordem / Fluxo / Zoom / Avisos)
 config.json      Paths e política
 GUIA_DE_USO.md   Checklist rápido do operador
 workspace/       ZIP do card (não versionado)

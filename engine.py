@@ -2343,10 +2343,81 @@ def enrich_additive(
     return checklist
 
 
+def _median(vals: list[float]) -> float:
+    if not vals:
+        return 0.0
+    s = sorted(vals)
+    mid = len(s) // 2
+    if len(s) % 2:
+        return float(s[mid])
+    return (float(s[mid - 1]) + float(s[mid])) / 2.0
+
+
+def apply_lane_sort(nodes: list[dict], edges: list[dict], passes: int = 3) -> None:
+    """Ordena nós dentro de cada camada (barycentric) para reduzir cruzamento de arestas."""
+    layers_order = [
+        "source", "seed", "sample", "staging", "intermediate", "mart", "aggregate", "other",
+    ]
+    by_layer: dict[str, list[dict]] = {L: [] for L in layers_order}
+    for n in nodes:
+        L = n.get("layer") or "other"
+        if L not in by_layer:
+            by_layer[L] = []
+        by_layer[L].append(n)
+
+    pos: dict[str, float] = {}
+    for L in layers_order:
+        lane = sorted(by_layer.get(L) or [], key=lambda n: (n.get("id") or ""))
+        by_layer[L] = lane
+        for i, n in enumerate(lane):
+            pos[n["id"]] = float(i)
+
+    preds: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+    succs: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+    id_set = set(preds)
+    for e in edges:
+        f, t = e.get("from"), e.get("to")
+        if f in id_set and t in id_set:
+            preds[t].append(f)
+            succs[f].append(t)
+
+    present = [L for L in layers_order if by_layer.get(L)]
+    for _ in range(max(1, passes)):
+        for i in range(1, len(present)):
+            L = present[i]
+            scored = []
+            for n in by_layer[L]:
+                neigh = [pos[p] for p in preds[n["id"]] if p in pos]
+                scored.append((_median(neigh) if neigh else pos[n["id"]], n["id"], n))
+            scored.sort(key=lambda x: (x[0], x[1]))
+            by_layer[L] = [t[2] for t in scored]
+            for j, n in enumerate(by_layer[L]):
+                pos[n["id"]] = float(j)
+        for i in range(len(present) - 2, -1, -1):
+            L = present[i]
+            scored = []
+            for n in by_layer[L]:
+                neigh = [pos[s] for s in succs[n["id"]] if s in pos]
+                scored.append((_median(neigh) if neigh else pos[n["id"]], n["id"], n))
+            scored.sort(key=lambda x: (x[0], x[1]))
+            by_layer[L] = [t[2] for t in scored]
+            for j, n in enumerate(by_layer[L]):
+                pos[n["id"]] = float(j)
+
+    for L in layers_order:
+        for i, n in enumerate(by_layer.get(L) or []):
+            n["lane_index"] = i
+            n["sort_key"] = i
+
+
+def _slim_names(items: list, limit: int = 12) -> tuple[list, int]:
+    items = list(items or [])
+    return items[:limit], len(items)
+
+
 def build_lineage(checklist: list[dict], graph: dict, models: dict) -> dict:
     """Estrutura para UI: nós por camada + arestas + metadados clicáveis."""
     status_map = {c["name"]: c for c in checklist}
-    # incluir refs/sources do grafo que aparecem no checklist ou como vizinhos
     names = set(status_map)
     for c in checklist:
         if c["status"] == "REMOVIDO":
@@ -2374,6 +2445,10 @@ def build_lineage(checklist: list[dict], graph: dict, models: dict) -> dict:
     nodes = []
     for n in sorted(names, key=lambda x: (layer_order(layer_of.get(x, "other")), x)):
         item = status_map.get(n)
+        up_full = upstream(graph, n)
+        down_full = list(downstream(graph, n))
+        up_slim, up_count = _slim_names(up_full, 12)
+        down_slim, down_count = _slim_names(down_full, 12)
         if item:
             status = item["status"]
             action = item.get("policy_action") or ""
@@ -2387,6 +2462,12 @@ def build_lineage(checklist: list[dict], graph: dict, models: dict) -> dict:
                 visual = "review"
             else:
                 visual = "exist"
+            cols, cols_n = _slim_names(item.get("columns") or [], 24)
+            base_cols, base_n = _slim_names(item.get("base_columns") or [], 24)
+            deps = list(graph.get(n, {}).get("refs", []))
+            used = list(graph.get(n, {}).get("dependents", []))
+            deps_s, deps_c = _slim_names(deps, 16)
+            used_s, used_c = _slim_names(used, 16)
             node = {
                 "id": n,
                 "label": n,
@@ -2397,27 +2478,39 @@ def build_lineage(checklist: list[dict], graph: dict, models: dict) -> dict:
                 "path": item.get("path", ""),
                 "domain": item.get("domain") or "",
                 "add_count": item.get("add_count", 0),
-                "add_items": item.get("add_items") or [],
+                "add_items": (item.get("add_items") or [])[:20],
                 "add_summary": item.get("add_summary") or "",
-                "ignored_changes": item.get("ignored_changes") or [],
-                "columns": item.get("columns") or [],
-                "base_columns": item.get("base_columns") or [],
-                "refs": item.get("refs") or [],
+                "ignored_changes": (item.get("ignored_changes") or [])[:8],
+                "columns": cols,
+                "columns_count": cols_n,
+                "base_columns": base_cols,
+                "base_columns_count": base_n,
+                "refs": list(item.get("refs") or [])[:20],
                 "sources": [
                     f"{a}.{b}" for a, b in (item.get("sources") or [])
-                ],
-                "upstream": upstream(graph, n),
-                "downstream": list(downstream(graph, n)),
-                "depends_on": list(graph.get(n, {}).get("refs", [])),
-                "used_by": list(graph.get(n, {}).get("dependents", [])),
+                ][:20],
+                "upstream": up_slim,
+                "upstream_count": up_count,
+                "downstream": down_slim,
+                "downstream_count": down_count,
+                "depends_on": deps_s,
+                "depends_on_count": deps_c,
+                "used_by": used_s,
+                "used_by_count": used_c,
                 "policy_action": action or "observe",
                 "bucket": item.get("bucket") or "",
                 "hint": item.get("hint") or "",
                 "type": item.get("type") or "model",
+                "lane_index": 0,
+                "sort_key": 0,
             }
         else:
-            # nó de contexto (já na base / source virtual)
             m = models.get(n) or {}
+            cols, cols_n = _slim_names(m.get("columns") or [], 24)
+            deps = list(graph.get(n, {}).get("refs", []))
+            used = list(graph.get(n, {}).get("dependents", []))
+            deps_s, deps_c = _slim_names(deps, 16)
+            used_s, used_c = _slim_names(used, 16)
             node = {
                 "id": n,
                 "label": n,
@@ -2431,18 +2524,26 @@ def build_lineage(checklist: list[dict], graph: dict, models: dict) -> dict:
                 "add_items": [],
                 "add_summary": "Já existe no projeto (contexto do fluxo).",
                 "ignored_changes": [],
-                "columns": list(m.get("columns") or []),
-                "base_columns": list(m.get("columns") or []),
-                "refs": list(m.get("refs") or []),
-                "sources": [f"{a}.{b}" for a, b in (m.get("sources") or [])],
-                "upstream": upstream(graph, n),
-                "downstream": list(downstream(graph, n)),
-                "depends_on": list(graph.get(n, {}).get("refs", [])),
-                "used_by": list(graph.get(n, {}).get("dependents", [])),
+                "columns": cols,
+                "columns_count": cols_n,
+                "base_columns": cols,
+                "base_columns_count": cols_n,
+                "refs": list(m.get("refs") or [])[:20],
+                "sources": [f"{a}.{b}" for a, b in (m.get("sources") or [])][:20],
+                "upstream": up_slim,
+                "upstream_count": up_count,
+                "downstream": down_slim,
+                "downstream_count": down_count,
+                "depends_on": deps_s,
+                "depends_on_count": deps_c,
+                "used_by": used_s,
+                "used_by_count": used_c,
                 "policy_action": "exists",
                 "bucket": "pronto",
                 "hint": "Nó de contexto — já na base / origem.",
                 "type": m.get("type") or ("source" if n.startswith("source.") else "model"),
+                "lane_index": 0,
+                "sort_key": 0,
             }
         nodes.append(node)
 
@@ -2452,19 +2553,24 @@ def build_lineage(checklist: list[dict], graph: dict, models: dict) -> dict:
         for ref in graph.get(n["id"], {}).get("refs", []):
             if ref in node_ids:
                 edges.append({"from": ref, "to": n["id"]})
-        # sources no item
-        for src in n.get("sources") or []:
-            sid = src if src.startswith("source.") else f"source.{src}" if "." in src else src
-            # sources já estão como source.schema.table nos refs do graph
-            pass
+
+    apply_lane_sort(nodes, edges)
+    nodes.sort(
+        key=lambda n: (
+            layer_order(n.get("layer") or "other"),
+            int(n.get("lane_index") or 0),
+            n.get("id") or "",
+        )
+    )
 
     layers_order = [
-        "source", "seed", "sample", "staging", "intermediate", "mart", "aggregate", "other"
+        "source", "seed", "sample", "staging", "intermediate", "mart", "aggregate", "other",
     ]
     return {
         "nodes": nodes,
         "edges": edges,
         "layers": [L for L in layers_order if any(n["layer"] == L for n in nodes)],
+        "stats": {"node_count": len(nodes), "edge_count": len(edges)},
     }
 
 

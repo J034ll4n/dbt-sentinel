@@ -66,3 +66,13 @@ Artefatos em `output/`:
 | `index.html` | Resumo, Diff, Ordem, Fluxo, Zoom, Avisos |
 | `roteiro.md` | Sequência + snippets |
 | `pending.md` | O que faltou após o `S` |
+
+## Demo de escala (Fluxo ~80 nós)
+
+Para validar o lineage em volume:
+
+```bash
+py -3 make_scale_demo.py
+```
+
+Gera `demo_base/` + `workspace/`, abre `output/index.html`. Na aba **Fluxo**: setas sob foco por padrão; use **Todas as setas**, busca e zoom. Restaure `config.json` a partir de `config.json.scalebak` quando terminar.

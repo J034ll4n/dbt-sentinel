@@ -673,7 +673,7 @@ def _wizard(session: dict) -> str:
 
 
 def _flow(session: dict) -> str:
-    """Lineage com setas SVG que se dividem (1→N) + breadcrumb ao clicar."""
+    """Lineage escalável: colunas por camada, setas sob foco, zoom/busca."""
     lin = session.get("lineage") or {}
     nodes = lin.get("nodes") or []
     edges = lin.get("edges") or []
@@ -681,23 +681,30 @@ def _flow(session: dict) -> str:
         return "<p class=\"empty\">Sem lineage para exibir. Rode a análise com base + workspace.</p>"
 
     layers = lin.get("layers") or []
-    by_layer = {L: [n for n in nodes if n.get("layer") == L] for L in layers}
+    by_layer = {
+        L: sorted(
+            [n for n in nodes if n.get("layer") == L],
+            key=lambda n: (int(n.get("lane_index") or 0), n.get("id") or ""),
+        )
+        for L in layers
+    }
 
+    compact = " compact" if len(nodes) >= 40 else ""
     lanes = []
-    for idx, L in enumerate(layers):
+    for L in layers:
         cards = []
         for n in by_layer.get(L) or []:
             vis = n.get("visual") or "exist"
             addn = int(n.get("add_count") or 0)
             kind = n.get("table_kind") or ""
-            used = n.get("used_by") or []
-            fan = f'<span class="ln-fan">→ {len(used)}</span>' if len(used) > 1 else ""
+            used_c = int(n.get("used_by_count") or len(n.get("used_by") or []))
+            fan = f'<span class="ln-fan">→{used_c}</span>' if used_c > 1 else ""
             add_chip = f'<span class="ln-add">+{addn}</span>' if addn else ""
             kind_chip = f'<span class="ln-kind">{_esc(kind)}</span>' if kind else ""
             cards.append(
                 f"""
 <button type="button" class="ln-node vis-{_esc(vis)}" data-node="{_esc(n['id'])}"
-  id="lnb-{_esc(n['id']).replace('.', '_')}"
+  data-lane="{int(n.get('lane_index') or 0)}"
   title="{_esc(n.get('add_summary') or n['id'])}">
   <span class="ln-name">{_esc(n.get('label') or n['id'])}</span>
   <span class="ln-meta">{kind_chip}{add_chip}{fan}</span>
@@ -706,7 +713,7 @@ def _flow(session: dict) -> str:
         lanes.append(
             f"""
 <div class="ln-lane" data-layer="{_esc(L)}">
-  <h4>{_esc(L)}</h4>
+  <h4>{_esc(L)} <span class="ln-lane-count">{len(cards)}</span></h4>
   <div class="ln-nodes">{''.join(cards)}</div>
 </div>"""
         )
@@ -715,7 +722,7 @@ def _flow(session: dict) -> str:
         f"<li><code>{_esc(e['from'])}</code> "
         f"<span class=\"arr\">alimenta →</span> "
         f"<code>{_esc(e['to'])}</code></li>"
-        for e in edges[:80]
+        for e in edges[:120]
     )
 
     cycles = session.get("dag_cycles") or []
@@ -744,34 +751,49 @@ def _flow(session: dict) -> str:
 </div>
 """
 
+    n_count = len(nodes)
+    e_count = len(edges)
     return f"""
 {cycle_html}
-<div class="lineage-wrap">
+<div class="lineage-wrap{compact}" id="lineage-wrap">
+  <div class="ln-toolbar">
+    <div class="ln-stats"><b>{n_count}</b> nós · <b>{e_count}</b> arestas</div>
+    <label class="ln-search">Buscar
+      <input type="search" id="ln-search" placeholder="nome do modelo…" autocomplete="off">
+    </label>
+    <label class="ln-toggle"><input type="checkbox" id="ln-all-edges"> Todas as setas</label>
+    <div class="ln-zoom">
+      <button type="button" id="ln-zoom-out" title="Diminuir">−</button>
+      <button type="button" id="ln-zoom-reset" title="Reset">100%</button>
+      <button type="button" id="ln-zoom-in" title="Aumentar">+</button>
+    </div>
+  </div>
   <div class="ln-legend">
     <span><i class="dot exist"></i> Cinza — já existe</span>
     <span><i class="dot new"></i> Verde — criar</span>
     <span><i class="dot append"></i> Âmbar — acrescer</span>
     <span><i class="dot locked"></i> Contorno — não reescrever</span>
   </div>
-  <div class="ln-breadcrumb" id="ln-breadcrumb">Clique num card para ver o caminho: origem → … → destino</div>
-  <p class="guide">
-    Fluxo deste card: setas saem da origem e <strong>se dividem</strong> quando alimenta vários arquivos.
-  </p>
+  <div class="ln-breadcrumb" id="ln-breadcrumb">
+    Clique num card para destacar o caminho. Por padrão só setas do card / seleção (escala).
+  </div>
   <div class="lineage-grid">
     <div class="ln-board-wrap" id="ln-board-wrap">
-      <svg class="ln-svg" id="ln-svg" xmlns="http://www.w3.org/2000/svg"></svg>
-      <div class="ln-board" id="ln-board">
-        {''.join(lanes)}
+      <div class="ln-zoom-inner" id="ln-zoom-inner">
+        <svg class="ln-svg" id="ln-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div class="ln-board" id="ln-board">
+          {''.join(lanes)}
+        </div>
       </div>
     </div>
     <aside class="ln-panel" id="ln-panel" aria-live="polite">
       <div class="ln-panel-empty">
         <h3>Detalhe do lineage</h3>
-        <p>Selecione um arquivo para ver: depende de → este → alimenta (com setas).</p>
+        <p>Selecione um arquivo para ver: depende de → este → alimenta.</p>
       </div>
     </aside>
   </div>
-  <details class="dep-list"><summary>Lista textual ({len(edges)} ligação(ões))</summary>
+  <details class="dep-list"><summary>Lista textual ({e_count} ligação(ões), amostra)</summary>
     <ul>{edge_lis or '<li>Sem ligações.</li>'}</ul>
   </details>
 </div>
@@ -1185,25 +1207,58 @@ footer {{
 }}
 .ln-board-wrap {{
   position:relative; overflow:auto; border:1px solid var(--line);
-  border-radius:16px; background:rgba(255,252,247,.55); min-height:280px;
+  border-radius:14px; background:#f4f7fa; min-height:320px; max-height:72vh;
+}}
+.ln-zoom-inner {{
+  position:relative; transform-origin:0 0; min-width:max-content;
 }}
 .ln-svg {{
   position:absolute; left:0; top:0; width:100%; height:100%;
   pointer-events:none; overflow:visible; z-index:1;
 }}
 .ln-svg path.edge {{
-  fill:none; stroke:#8a96a5; stroke-width:2; opacity:.75;
+  fill:none; stroke:#94a3b8; stroke-width:1.5; opacity:.55;
 }}
 .ln-svg path.edge.hi {{
-  stroke:#1f7a4d; stroke-width:3; opacity:1;
+  stroke:#0f766e; stroke-width:2.5; opacity:1;
 }}
 .ln-svg path.edge.dim {{
-  opacity:.15;
+  opacity:.08;
+}}
+.ln-svg path.edge.work {{
+  stroke:#64748b; stroke-width:1.4; opacity:.4;
+}}
+.ln-toolbar {{
+  display:flex; flex-wrap:wrap; gap:.65rem 1rem; align-items:center;
+  margin:0 0 .75rem; padding:.65rem .85rem; border-radius:12px;
+  background:var(--panel); border:1px solid var(--line);
+}}
+.ln-stats {{ font-family:var(--mono); font-size:.82rem; color:var(--muted); }}
+.ln-stats b {{ color:var(--ink); }}
+.ln-search {{ display:flex; flex-direction:column; gap:.25rem; font-size:.8rem; font-weight:700; }}
+.ln-search input {{
+  font:inherit; padding:.4rem .65rem; border-radius:8px; border:1px solid var(--line);
+  min-width:min(100%, 220px); background:#fff;
+}}
+.ln-toggle {{ font-size:.85rem; font-weight:600; color:var(--muted); display:flex; gap:.4rem; align-items:center; }}
+.ln-zoom {{ display:flex; gap:.25rem; }}
+.ln-zoom button {{
+  font:inherit; font-weight:700; cursor:pointer; min-width:2.1rem;
+  padding:.35rem .55rem; border-radius:8px; border:1px solid var(--line);
+  background:#fff; color:var(--ink);
+}}
+.ln-zoom button:hover {{ border-color:var(--new); color:var(--new); }}
+.lineage-grid {{
+  display:grid; grid-template-columns:minmax(0,1fr) minmax(240px,300px);
+  gap:1rem; align-items:start;
+}}
+@media (max-width: 960px) {{
+  .lineage-grid {{ grid-template-columns:1fr; }}
 }}
 .ln-breadcrumb {{
-  margin:.5rem 0 .75rem; padding:.65rem .9rem; border-radius:12px;
-  background:#eef6f2; border:1px solid #b7dbc8; font-weight:700;
-  font-family:Consolas, "Courier New", monospace; font-size:.9rem;
+  margin:.5rem 0 .75rem; padding:.65rem .9rem; border-radius:10px;
+  background:#ecfdf5; border:1px solid #a7f3d0; font-weight:700;
+  font-family:var(--mono); font-size:.85rem;
   word-break:break-word;
 }}
 .domain-title {{
@@ -1211,8 +1266,11 @@ footer {{
   font-weight:800; text-transform:uppercase; letter-spacing:.04em;
 }}
 .ln-fan {{
-  font-size:.7rem; font-weight:800; padding:.1rem .4rem; border-radius:999px;
-  background:#e7f0ff; color:#274c77;
+  font-size:.65rem; font-weight:800; padding:.1rem .35rem; border-radius:4px;
+  background:#e2e8f0; color:#334155;
+}}
+.ln-lane-count {{
+  font-weight:600; color:var(--muted); text-transform:none; letter-spacing:0;
 }}
 .macro-toolbar {{
   display:flex; flex-wrap:wrap; gap:.85rem 1.25rem; align-items:flex-end;
@@ -1296,65 +1354,75 @@ footer {{
 .dep-list .arr {{ color:var(--muted); font-weight:700; margin:0 .35rem; }}
 .stat.hl-append {{ border-color:#f0c28a; background:#fff4e5; }}
 .ln-board {{
-  display:flex; gap:.85rem; padding:1rem .85rem 1.2rem;
+  display:flex; gap:.75rem; padding:1rem .85rem 1.2rem;
   position:relative; z-index:2; min-width:max-content;
 }}
 .ln-lane {{
-  min-width:168px; max-width:200px; flex:0 0 auto;
-  background:rgba(255,252,247,.85); border:1px solid var(--line);
-  border-radius:16px; padding:.7rem .65rem;
+  min-width:156px; max-width:188px; flex:0 0 auto;
+  background:#fff; border:1px solid #dbe3ec;
+  border-radius:12px; padding:.55rem .5rem .7rem;
 }}
 .ln-lane h4 {{
-  margin:0 0 .65rem; text-transform:uppercase; letter-spacing:.06em;
-  font-size:.72rem; color:var(--muted); font-weight:800;
+  position:sticky; top:0; z-index:3;
+  margin:0 0 .55rem; padding:.35rem .4rem; border-radius:6px;
+  background:#eef2f6; text-transform:uppercase; letter-spacing:.05em;
+  font-size:.68rem; color:var(--muted); font-weight:800;
 }}
-.ln-nodes {{ display:flex; flex-direction:column; gap:.5rem; }}
+.ln-nodes {{ display:flex; flex-direction:column; gap:.4rem; }}
 .ln-node {{
-  text-align:left; cursor:pointer; border-radius:12px; padding:.65rem .7rem;
+  text-align:left; cursor:pointer; border-radius:8px; padding:.5rem .55rem;
   border:1px solid #c5ced8; background:#e8edf2; color:var(--ink);
-  font:inherit; transition:transform .15s ease, box-shadow .15s ease, border-color .15s;
-  box-shadow:0 4px 12px rgba(28,36,48,.04);
+  font:inherit; transition:border-color .12s ease, box-shadow .12s ease, opacity .12s;
 }}
-.ln-node:hover {{ transform:translateY(-1px); border-color:#9aa8b8; }}
-.ln-node:focus {{ outline:2px solid var(--focus); outline-offset:2px; }}
+.ln-node:hover {{ border-color:#64748b; }}
+.ln-node:focus {{ outline:2px solid var(--focus); outline-offset:1px; }}
 .ln-node.vis-new {{
-  background:linear-gradient(180deg, #dff3e8, #f3faf6);
-  border-color:#7cbc9a; box-shadow:0 6px 16px rgba(31,122,77,.12);
+  background:#ecfdf5; border-color:#5eead4;
+}}
+.ln-node.vis-append {{
+  background:#fff7ed; border-color:#fdba74;
 }}
 .ln-node.vis-exist {{
-  background:#e9eef3; border-color:#c2cad4; color:#3d4a58;
+  background:#f1f5f9; border-color:#cbd5e1; color:#475569;
 }}
 .ln-node.vis-locked {{
-  background:#f3f1f0; border:1.5px dashed #c9857e; color:#5c403c;
+  background:#f8fafc; border:1.5px dashed #fca5a5; color:#7f1d1d;
 }}
 .ln-node.vis-review {{
-  background:#fff8e8; border:1.5px solid #d4a017;
+  background:#fffbeb; border:1.5px solid #fbbf24;
 }}
 .ln-node.active {{
-  outline:2px solid var(--focus); outline-offset:2px;
-  box-shadow:0 0 0 4px rgba(47,111,237,.15);
+  outline:2px solid #0f766e; outline-offset:1px;
+  box-shadow:0 0 0 3px rgba(15,118,110,.18);
 }}
-.ln-node.dim {{ opacity:.35; }}
-.ln-node.path {{ opacity:1; box-shadow:0 0 0 2px rgba(31,122,77,.35); }}
-.ln-name {{ display:block; font-weight:700; font-size:.92rem; word-break:break-all; }}
-.ln-meta {{ display:flex; gap:.35rem; flex-wrap:wrap; margin-top:.35rem; }}
+.ln-node.dim {{ opacity:.28; }}
+.ln-node.path {{ opacity:1; box-shadow:0 0 0 2px rgba(15,118,110,.28); }}
+.ln-node.hidden-filter {{ display:none !important; }}
+.ln-name {{
+  display:block; font-weight:700; font-size:.8rem; font-family:var(--mono);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px;
+}}
+.ln-meta {{ display:flex; gap:.25rem; flex-wrap:wrap; margin-top:.25rem; }}
 .ln-kind, .ln-add {{
-  font-size:.7rem; font-weight:800; padding:.1rem .4rem; border-radius:999px;
+  font-size:.65rem; font-weight:800; padding:.08rem .32rem; border-radius:4px;
 }}
-.ln-kind {{ background:#e7f0ff; color:#274c77; }}
+.ln-kind {{ background:#e0e7ff; color:#3730a3; }}
 .ln-add {{ background:var(--new-bg); color:var(--new); }}
+.lineage-wrap.compact .ln-node {{ padding:.38rem .45rem; }}
+.lineage-wrap.compact .ln-name {{ font-size:.72rem; max-width:140px; }}
+.lineage-wrap.compact .ln-lane {{ min-width:138px; max-width:158px; }}
 .ln-panel {{
-  background:var(--panel); border:1px solid var(--line); border-radius:16px;
-  padding:1.1rem 1.2rem; box-shadow:var(--shadow); min-height:320px;
-  position:sticky; top:.75rem;
+  background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:1rem 1.1rem; box-shadow:var(--shadow); min-height:280px;
+  position:sticky; top:.75rem; max-height:72vh; overflow:auto;
 }}
-.ln-panel h3 {{ margin:0 0 .5rem; font-family:Georgia, "Palatino Linotype", serif; }}
-.ln-panel .kv {{ margin:.35rem 0; color:var(--muted); font-size:.92rem; }}
+.ln-panel h3 {{ margin:0 0 .5rem; font-family:Georgia, "Palatino Linotype", serif; font-size:1.05rem; }}
+.ln-panel .kv {{ margin:.35rem 0; color:var(--muted); font-size:.9rem; }}
 .ln-panel .kv b {{ color:var(--ink); }}
 .ln-panel .path-chain {{
-  background:#f0f4f8; border-radius:10px; padding:.65rem .75rem;
-  font-family:Consolas, "Courier New", monospace; font-size:.82rem;
-  word-break:break-word; margin:.55rem 0 0.85rem;
+  background:#f1f5f9; border-radius:8px; padding:.55rem .65rem;
+  font-family:var(--mono); font-size:.78rem;
+  word-break:break-word; margin:.45rem 0 0.75rem;
 }}
 .ln-panel-empty {{ color:var(--muted); }}
 .pipeline {{
@@ -1578,13 +1646,28 @@ document.addEventListener("click", (ev) => {{
   if (!nodes.length) return;
   const byId = {{}};
   nodes.forEach(n => {{ byId[n.id] = n; }});
+  const workIds = new Set(
+    nodes.filter(n => n.visual === "new" || n.visual === "append").map(n => n.id)
+  );
   const panel = document.getElementById("ln-panel");
   const crumb = document.getElementById("ln-breadcrumb");
   const wrap = document.getElementById("ln-board-wrap");
   const board = document.getElementById("ln-board");
+  const zoomInner = document.getElementById("ln-zoom-inner");
   const svg = document.getElementById("ln-svg");
-  const buttons = document.querySelectorAll(".ln-node");
+  const searchEl = document.getElementById("ln-search");
+  const allEdgesEl = document.getElementById("ln-all-edges");
+  const zoomIn = document.getElementById("ln-zoom-in");
+  const zoomOut = document.getElementById("ln-zoom-out");
+  const zoomReset = document.getElementById("ln-zoom-reset");
+  if (!board || !wrap || !svg) return;
+  const buttons = board.querySelectorAll(".ln-node");
   let activeId = null;
+  let hoverId = null;
+  let showAll = false;
+  let zoom = 1;
+  let drawTimer = null;
+  const posCache = {{}};
 
   function esc(s) {{
     return String(s == null ? "" : s)
@@ -1594,7 +1677,7 @@ document.addEventListener("click", (ev) => {{
 
   function elFor(id) {{
     const safe = String(id).replace(/\\\\/g, "\\\\\\\\").replace(/"/g, '\\\\"');
-    return document.querySelector('.ln-node[data-node="' + safe + '"]');
+    return board.querySelector('.ln-node[data-node="' + safe + '"]');
   }}
 
   function neighbors(id) {{
@@ -1617,9 +1700,48 @@ document.addEventListener("click", (ev) => {{
     return keys;
   }}
 
+  function workEdgeKeys() {{
+    const keys = new Set();
+    edges.forEach(e => {{
+      if (workIds.has(e.from) || workIds.has(e.to)) keys.add(e.from + ">>" + e.to);
+    }});
+    return keys;
+  }}
+
+  function measurePositions() {{
+    const wr = wrap.getBoundingClientRect();
+    Object.keys(posCache).forEach(k => delete posCache[k]);
+    board.querySelectorAll(".ln-node").forEach(el => {{
+      if (el.classList.contains("hidden-filter")) return;
+      const id = el.getAttribute("data-node");
+      const r = el.getBoundingClientRect();
+      posCache[id] = {{
+        x1: r.right - wr.left + wrap.scrollLeft,
+        y1: r.top + r.height / 2 - wr.top + wrap.scrollTop,
+        x2: r.left - wr.left + wrap.scrollLeft,
+        y2: r.top + r.height / 2 - wr.top + wrap.scrollTop,
+      }};
+    }});
+  }}
+
+  function applyZoom() {{
+    if (!zoomInner) return;
+    zoomInner.style.transform = "scale(" + zoom + ")";
+    if (zoomReset) zoomReset.textContent = Math.round(zoom * 100) + "%";
+    scheduleDraw();
+  }}
+
+  function scheduleDraw() {{
+    if (drawTimer) clearTimeout(drawTimer);
+    drawTimer = setTimeout(() => requestAnimationFrame(drawEdges), 40);
+  }}
+
   function drawEdges() {{
     if (!svg || !wrap || !board) return;
-    const wr = wrap.getBoundingClientRect();
+    const focusId = activeId || hoverId;
+    const hi = focusId ? pathEdges(focusId) : null;
+    const workKeys = (!focusId && !showAll) ? workEdgeKeys() : null;
+
     const bw = board.scrollWidth;
     const bh = Math.max(board.scrollHeight, wrap.clientHeight);
     svg.setAttribute("width", bw);
@@ -1627,47 +1749,37 @@ document.addEventListener("click", (ev) => {{
     svg.style.width = bw + "px";
     svg.style.height = bh + "px";
     while (svg.firstChild) svg.removeChild(svg.firstChild);
-    const hi = activeId ? pathEdges(activeId) : null;
+
+    measurePositions();
 
     edges.forEach(e => {{
-      const a = elFor(e.from);
-      const b = elFor(e.to);
+      const key = e.from + ">>" + e.to;
+      let cls = "edge";
+      if (showAll && hi) {{
+        cls += hi.has(key) ? " hi" : " dim";
+      }} else if (showAll) {{
+        cls += " work";
+      }} else if (hi) {{
+        if (!hi.has(key)) return;
+        cls += " hi";
+      }} else if (workKeys) {{
+        if (!workKeys.has(key)) return;
+        cls += " work";
+      }} else {{
+        return;
+      }}
+      const a = posCache[e.from];
+      const b = posCache[e.to];
       if (!a || !b) return;
-      const ra = a.getBoundingClientRect();
-      const rb = b.getBoundingClientRect();
-      const x1 = ra.right - wr.left + wrap.scrollLeft;
-      const y1 = ra.top + ra.height / 2 - wr.top + wrap.scrollTop;
-      const x2 = rb.left - wr.left + wrap.scrollLeft;
-      const y2 = rb.top + rb.height / 2 - wr.top + wrap.scrollTop;
-      const dx = Math.max(40, (x2 - x1) * 0.45);
-      const d = "M " + x1 + " " + y1 + " C " + (x1 + dx) + " " + y1 + ", " + (x2 - dx) + " " + y2 + ", " + x2 + " " + y2;
+      const x1 = a.x1, y1 = a.y1, x2 = b.x2, y2 = b.y2;
+      const dx = Math.max(36, Math.abs(x2 - x1) * 0.4);
+      const d = (x2 >= x1)
+        ? ("M " + x1 + " " + y1 + " C " + (x1 + dx) + " " + y1 + ", " + (x2 - dx) + " " + y2 + ", " + x2 + " " + y2)
+        : ("M " + x1 + " " + y1 + " C " + (x1 + 50) + " " + (y1 - 30) + ", " + (x2 - 50) + " " + (y2 + 30) + ", " + x2 + " " + y2);
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("d", d);
-      path.setAttribute("class", "edge");
-      const key = e.from + ">>" + e.to;
-      if (hi) {{
-        if (hi.has(key)) path.classList.add("hi");
-        else path.classList.add("dim");
-      }}
-      // ponta da seta
-      const marker = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-      const ang = Math.atan2(y2 - y1, x2 - x1);
-      const ah = 7;
-      const ax = x2 - Math.cos(ang) * 2;
-      const ay = y2 - Math.sin(ang) * 2;
-      const p1 = (ax) + "," + (ay);
-      const p2 = (x2 - Math.cos(ang - 0.4) * ah) + "," + (y2 - Math.sin(ang - 0.4) * ah);
-      const p3 = (x2 - Math.cos(ang + 0.4) * ah) + "," + (y2 - Math.sin(ang + 0.4) * ah);
-      marker.setAttribute("points", p1 + " " + p2 + " " + p3);
-      marker.setAttribute("class", "edge");
-      if (hi) {{
-        marker.setAttribute("fill", hi.has(key) ? "#1f7a4d" : "#c5ced8");
-        marker.style.opacity = hi.has(key) ? "1" : "0.2";
-      }} else {{
-        marker.setAttribute("fill", "#8a96a5");
-      }}
+      path.setAttribute("class", cls);
       svg.appendChild(path);
-      svg.appendChild(marker);
     }});
   }}
 
@@ -1693,7 +1805,7 @@ document.addEventListener("click", (ev) => {{
       btn.classList.toggle("path", onPath && bid !== id);
     }});
 
-    const chain = [...(n.upstream || []), n.id];
+    const chain = [...(n.upstream || []).slice(-6), n.id];
     if (crumb) crumb.textContent = chain.join("  →  ");
 
     const visLabel = n.visual === "new"
@@ -1711,21 +1823,18 @@ document.addEventListener("click", (ev) => {{
 
     const depends = (n.depends_on && n.depends_on.length)
       ? n.depends_on.map(esc).join(" → ")
-      : ((n.upstream || []).map(esc).join(" → ") || "—");
+        + (n.depends_on_count > n.depends_on.length ? " …" : "")
+      : "—";
     const usedBy = (n.used_by && n.used_by.length)
       ? n.used_by.map(esc).join("  ·  ")
-      : ((n.downstream || []).slice(0, 12).map(esc).join("  ·  ") || "—");
+        + (n.used_by_count > n.used_by.length ? " …" : "")
+      : "—";
 
     let ignored = "";
     if (n.ignored_changes && n.ignored_changes.length) {{
       ignored = "<p class='stop-line'>Não aplique no principal</p><ul class='add-list muted'>" +
         n.ignored_changes.map(x => "<li>" + esc(x) + "</li>").join("") + "</ul>";
     }}
-
-    const fanOut = (n.used_by || []).length > 1
-      ? "<p class='guide'><strong>Este card se divide em " + n.used_by.length +
-        " saídas:</strong> " + n.used_by.map(esc).join(", ") + "</p>"
-      : "";
 
     const macFocuses = ((S.macro || {{}}).focuses || []).map(f => f.id);
     const jumpMacro = macFocuses.indexOf(id) >= 0
@@ -1743,43 +1852,63 @@ document.addEventListener("click", (ev) => {{
       (n.domain ? "<div class='kv'><b>Negócio:</b> " + esc(n.domain) + "</div>" : "") +
       "<div class='kv'><b>Política:</b> " + esc(policy) + "</div>" +
       "<p class='guide'>" + esc(n.add_summary || "") + "</p>" +
-      fanOut +
-      "<p><strong>Caminho (breadcrumb)</strong></p>" +
+      "<p><strong>Caminho</strong></p>" +
       "<div class='path-chain'>" + chain.map(esc).join(" → ") + "</div>" +
       "<p><strong>Depende de (←)</strong></p>" +
       "<div class='path-chain'>" + depends + "</div>" +
-      "<p><strong>Alimenta (→) — setas que saem daqui</strong></p>" +
+      "<p><strong>Alimenta (→)</strong></p>" +
       "<div class='path-chain'>" + usedBy + "</div>" +
       "<p><strong>Itens a adicionar (" + (n.add_count || 0) + ")</strong></p>" +
       renderItems(n.add_items) +
-      ignored +
-      "<p><strong>Colunas no card</strong></p>" +
-      ((n.columns && n.columns.length)
-        ? "<p><code>" + n.columns.map(esc).join("</code>, <code>") + "</code></p>"
-        : "<p class='empty'>Sem colunas detectadas no SELECT.</p>") +
-      ((n.base_columns && n.base_columns.length)
-        ? "<p><strong>Colunas já na base</strong></p><p><code>" +
-          n.base_columns.map(esc).join("</code>, <code>") + "</code></p>"
-        : "");
-    requestAnimationFrame(drawEdges);
+      ignored;
+    scheduleDraw();
   }}
 
   buttons.forEach(btn => {{
     btn.addEventListener("click", () => show(btn.getAttribute("data-node")));
+    btn.addEventListener("mouseenter", () => {{
+      hoverId = btn.getAttribute("data-node");
+      if (!activeId) scheduleDraw();
+    }});
+    btn.addEventListener("mouseleave", () => {{
+      hoverId = null;
+      if (!activeId) scheduleDraw();
+    }});
   }});
-  if (wrap) wrap.addEventListener("scroll", () => drawEdges());
-  window.addEventListener("resize", () => drawEdges());
-  // redesenha ao abrir a aba Lineage
+
+  if (wrap) wrap.addEventListener("scroll", scheduleDraw, {{ passive: true }});
+  window.addEventListener("resize", scheduleDraw);
   document.querySelectorAll("nav.tabs label").forEach(lab => {{
-    lab.addEventListener("click", () => setTimeout(drawEdges, 50));
+    lab.addEventListener("click", () => setTimeout(scheduleDraw, 60));
   }});
+
+  if (allEdgesEl) {{
+    allEdgesEl.addEventListener("change", () => {{
+      showAll = !!allEdgesEl.checked;
+      scheduleDraw();
+    }});
+  }}
+  if (searchEl) {{
+    searchEl.addEventListener("input", () => {{
+      const q = (searchEl.value || "").trim().toLowerCase();
+      buttons.forEach(btn => {{
+        const id = (btn.getAttribute("data-node") || "").toLowerCase();
+        const hit = !q || id.indexOf(q) >= 0;
+        btn.classList.toggle("hidden-filter", !hit);
+      }});
+      scheduleDraw();
+    }});
+  }}
+  if (zoomIn) zoomIn.addEventListener("click", () => {{ zoom = Math.min(1.6, zoom + 0.1); applyZoom(); }});
+  if (zoomOut) zoomOut.addEventListener("click", () => {{ zoom = Math.max(0.55, zoom - 0.1); applyZoom(); }});
+  if (zoomReset) zoomReset.addEventListener("click", () => {{ zoom = 1; applyZoom(); }});
 
   const firstNew = nodes.find(n => n.visual === "new")
     || nodes.find(n => n.visual === "append")
     || nodes[0];
   if (firstNew) show(firstNew.id);
-  else drawEdges();
-  setTimeout(drawEdges, 100);
+  else scheduleDraw();
+  setTimeout(scheduleDraw, 120);
 }})();
 
 (function macroUI() {{
